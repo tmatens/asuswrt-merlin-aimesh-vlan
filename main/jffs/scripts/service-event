@@ -1,0 +1,12 @@
+#!/bin/sh
+# =============================================================================
+# service-event  (MAIN NODE)
+#
+# Location on router : /jffs/scripts/service-event
+# Called by          : Asuswrt-Merlin — before every service event (pre-hook)
+#
+# NOTE: Bridge restoration is handled by service-event-end (post-hook), not
+# here. service-event fires BEFORE the service action, so any bridge changes
+# made here would be immediately overwritten by Merlin's own restart logic.
+# This file is intentionally a no-op.
+# =============================================================================

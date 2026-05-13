@@ -1,0 +1,40 @@
+#!/bin/sh
+# =============================================================================
+# service-event-end  (MAIN NODE)
+#
+# Location on router : /jffs/scripts/service-event-end
+# Called by          : Asuswrt-Merlin — after every service event completes
+#
+# Arguments (set by Merlin)
+# -------------------------
+#   $1  event  e.g. "restart", "start", "stop"
+#   $2  target e.g. "wireless", "firewall", "dnsmasq"
+#
+# What this does
+# --------------
+# When wireless restarts, Merlin rebuilds br0 and moves all wireless
+# interfaces back into it — silently undoing any VLAN bridge separation.
+# This hook detects that event and re-runs vlan-bridge-setup to restore
+# the correct bridge layout.
+#
+# NOTE: service-event-end fires AFTER the service action completes. This is
+# critical — service-event (pre-hook) fires before Merlin rebuilds br0, so
+# any bridge changes made there are immediately overwritten. We use the
+# post-hook instead so our setup runs after Merlin has finished.
+#
+# All other events are ignored so this hook does not interfere with anything
+# else Merlin manages.
+# =============================================================================
+
+EVENT="$1"
+TARGET="$2"
+SETUP="/jffs/scripts/vlan-bridge-setup"
+
+if [ "$TARGET" = "wireless" ] && [ "$EVENT" != "stop" ]; then
+    logger -t service-event-end "Wireless restart detected — re-running vlan-bridge-setup"
+    if [ -x "$SETUP" ]; then
+        "$SETUP" &
+    else
+        logger -t service-event-end "ERROR: $SETUP not found or not executable"
+    fi
+fi

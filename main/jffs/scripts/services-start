@@ -1,0 +1,34 @@
+#!/bin/sh
+# =============================================================================
+# services-start  (MAIN NODE)
+#
+# Location on router : /jffs/scripts/services-start
+# Called by          : Asuswrt-Merlin — once at boot, after core services start
+#
+# What this does
+# --------------
+# Launches vlan-bridge-setup in the background. The setup script polls for
+# wireless interfaces (up to 90 s) before acting, so it must not block this
+# hook — the wireless driver creates those interfaces after services-start
+# returns.
+#
+# Also launches the optional backhaul stability monitor (logs wds* link
+# state changes with timestamps).
+# =============================================================================
+
+SETUP="/jffs/scripts/vlan-bridge-setup"
+
+if [ -x "$SETUP" ]; then
+    "$SETUP" &
+else
+    logger -t services-start "ERROR: $SETUP not found or not executable"
+fi
+
+# Backhaul stability monitor — logs wds link state changes with timestamps.
+# Optional; remove these lines if you don't want backhaul logging.
+MONITOR="/jffs/scripts/monitor-backhaul.sh"
+if [ -x "$MONITOR" ]; then
+    "$MONITOR" &
+else
+    logger -t services-start "WARNING: $MONITOR not found or not executable"
+fi

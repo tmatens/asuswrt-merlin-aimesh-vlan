@@ -1,0 +1,26 @@
+#!/bin/sh
+# =============================================================================
+# services-start  (SATELLITE / SECONDARY NODE)
+#
+# Location on router : /jffs/scripts/services-start
+# Called by          : Asuswrt-Merlin — once at boot, after services start
+#
+# What this does
+# --------------
+# Runs vlan-bridge-setup in the background so br40 / br30 and the eth6.X
+# VLAN trunk sub-interfaces are created at every boot, and the VAP-drift
+# watcher is started.
+#
+# NOTE on VAP numbering — AiMesh satellites differ from the wired root:
+#   Primary  (root): wl0.1 = IoT     wl0.2 = Guest
+#   Satellite:       wl0.1 = Main    wl0.2 = IoT     wl0.3 = Guest
+# Do not blindly disable .1 or .2 here; the indexes mean different things.
+# =============================================================================
+
+SETUP="/jffs/scripts/vlan-bridge-setup"
+
+if [ -x "$SETUP" ]; then
+    "$SETUP" &
+else
+    logger -t services-start "ERROR: $SETUP not found or not executable"
+fi

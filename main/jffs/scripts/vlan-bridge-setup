@@ -1,0 +1,251 @@
+#!/bin/sh
+# =============================================================================
+# vlan-bridge-setup  (MAIN NODE / wired root)
+#
+# Location on router : /jffs/scripts/vlan-bridge-setup
+# Called by          : services-start (boot), service-event-end (wireless restart)
+#
+# What this does
+# --------------
+# Asuswrt-Merlin puts every wireless interface into one flat bridge (br0), so
+# all SSID traffic lands on the same network regardless of which SSID a client
+# joined. This script creates dedicated bridges for the Guest and IoT SSIDs and
+# pushes their traffic onto VLAN-tagged trunk sub-interfaces.
+#
+#   br40 -- IoT clients    (VLAN 40)
+#   br30 -- Guest clients  (VLAN 30)
+#
+# Bridge layout produced (defaults — edit IOT_*/GUEST_* below to change):
+#
+#   Main SSID    (wl0   / wl1   / wl2  ) -> br0  -> eth0      (untagged) -> VLAN 1
+#   Main-IoT     (wl0.1 / wl1.1 / wl2.1) -> br40 -> eth0.40   (VLAN 40 tagged)
+#   Main-Guest   (wl0.2 / wl1.2        ) -> br30 -> eth0.30   (VLAN 30 tagged)
+#
+# Edit the VLAN ids, bridge names, or wireless interface lists below to suit
+# your network. The trunk port (TRUNK) is the wired uplink to your managed
+# switch / upstream router.
+#
+# Backhaul note
+# -------------
+# When AiMesh is used, the primary may carry simultaneous wireless backhaul
+# links to satellites on all three radios:
+#   wds0.0.1  2.4 GHz  (driver wl0)
+#   wds1.0.1  5 GHz    (driver wl1)
+#   wds2.0.1  6 GHz    (driver wl2)
+# Each gets matching VLAN sub-interfaces so tagged frames from a satellite
+# traverse any backhaul band correctly.
+# =============================================================================
+
+TRUNK="eth0"
+BACKHAUL_IFACES="wds0.0.1 wds1.0.1 wds2.0.1"
+LOG="/tmp/vlan-bridge-setup.log"
+
+# --- VLAN definitions --------------------------------------------------------
+IOT_VLAN="40";   IOT_BRIDGE="br40";   IOT_IFACES="wl0.1 wl1.1 wl2.1"
+GUEST_VLAN="30"; GUEST_BRIDGE="br30"; GUEST_IFACES="wl0.2 wl1.2"
+
+log() { echo "[$(date '+%H:%M:%S')] vlan-bridge: $*" | tee -a "$LOG"; }
+
+# Return the bridge an interface belongs to (empty string if none).
+get_master() {
+    ip link show "$1" 2>/dev/null | grep -o 'master [^ ]*' | awk '{print $2}'
+}
+
+# ---------------------------------------------------------------------------
+# Wait for wireless interfaces to exist.
+# $1 = space-separated interface list, $2 = max wait seconds
+# ---------------------------------------------------------------------------
+wait_for_ifaces() {
+    local ifaces="$1" max="$2" waited=0
+    log "Waiting for interfaces: $ifaces"
+    while [ "$waited" -lt "$max" ]; do
+        local all=1
+        for iface in $ifaces; do
+            ip link show "$iface" >/dev/null 2>&1 || { all=0; break; }
+        done
+        [ "$all" = "1" ] && return 0
+        sleep 3
+        waited=$((waited + 3))
+    done
+    log "ERROR: Timed out after ${max}s waiting for: $ifaces"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Create a VLAN-tagged sub-interface on the trunk port.
+# $1 = VLAN id
+# ---------------------------------------------------------------------------
+setup_vlan_iface() {
+    local vlan="$1" viface="${TRUNK}.${1}"
+    if ! ip link show "$viface" >/dev/null 2>&1; then
+        log "Creating ${viface} (VLAN ${vlan} on ${TRUNK})"
+        ip link add link "$TRUNK" name "$viface" type vlan id "$vlan"
+    fi
+    ip link set "$viface" up
+}
+
+# ---------------------------------------------------------------------------
+# Create a bridge with STP disabled.
+# $1 = bridge name
+# ---------------------------------------------------------------------------
+setup_bridge() {
+    local br="$1"
+    if ! ip link show "$br" >/dev/null 2>&1; then
+        log "Creating bridge ${br}"
+        brctl addbr "$br"
+        brctl setfd "$br" 0
+        brctl stp  "$br" off
+    fi
+    ip link set "$br" up
+}
+
+# ---------------------------------------------------------------------------
+# Move wireless interfaces from br0 into the target bridge, then add the
+# VLAN trunk sub-interface.
+# $1 = bridge name, $2 = VLAN id, $3 = space-separated interface list
+# ---------------------------------------------------------------------------
+assign_ifaces() {
+    local br="$1" vlan="$2" ifaces="$3"
+    local viface="${TRUNK}.${vlan}"
+
+    for iface in $ifaces; do
+        if ! ip link show "$iface" >/dev/null 2>&1; then
+            log "WARN: ${iface} does not exist -- skipping"
+            continue
+        fi
+
+        local master
+        master=$(ip link show "$iface" | grep -o 'master [^ ]*' | awk '{print $2}')
+
+        if [ "$master" = "br0" ]; then
+            log "Moving ${iface}: br0 -> ${br}"
+            brctl delif br0 "$iface" 2>/dev/null
+        elif [ "$master" = "$br" ]; then
+            log "${iface} already in ${br} -- skipping"
+            continue
+        fi
+
+        brctl addif "$br" "$iface" 2>/dev/null
+        ip link set "$iface" up
+    done
+
+    if ! brctl show "$br" 2>/dev/null | grep -q "${viface}"; then
+        log "Adding ${viface} to ${br}"
+        brctl addif "$br" "$viface"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Create VLAN sub-interfaces on backhaul links and add them to a bridge.
+# Handles the case where the kernel auto-adds a new VLAN sub-interface to
+# the parent's bridge (br0) before we can place it — if the interface is
+# already in a different bridge we remove it first.
+# $1 = bridge name, $2 = VLAN id
+# ---------------------------------------------------------------------------
+setup_backhaul_vlan() {
+    local br="$1" vlan="$2"
+    for wds in $BACKHAUL_IFACES; do
+        ip link show "$wds" >/dev/null 2>&1 || continue
+        local wds_vif="${wds}.${vlan}"
+        if ! ip link show "$wds_vif" >/dev/null 2>&1; then
+            log "Creating ${wds_vif} (VLAN ${vlan} on ${wds})"
+            ip link add link "$wds" name "$wds_vif" type vlan id "$vlan"
+            # Add to bridge BEFORE bringing up — ip link set up triggers the
+            # kernel to auto-add the interface to the parent's bridge (br0),
+            # which races with our brctl addif.
+            log "Adding ${wds_vif} to ${br}"
+            brctl addif "$br" "$wds_vif" 2>/dev/null
+        fi
+        ip link set "$wds_vif" up
+
+        local current_br
+        current_br=$(get_master "$wds_vif")
+
+        # Already in the correct bridge — nothing to do.
+        [ "$current_br" = "$br" ] && continue
+
+        # In the wrong bridge — remove first, then re-add.
+        if [ -n "$current_br" ]; then
+            log "WARN: ${wds_vif} is in ${current_br}, expected ${br} — moving"
+            if ! brctl delif "$current_br" "$wds_vif" 2>&1; then
+                log "ERROR: failed to remove ${wds_vif} from ${current_br}"
+                continue
+            fi
+        fi
+
+        log "Adding ${wds_vif} to ${br}"
+        if ! brctl addif "$br" "$wds_vif" 2>&1; then
+            log "ERROR: failed to add ${wds_vif} to ${br}"
+            continue
+        fi
+
+        # Verify placement.
+        local verify_br
+        verify_br=$(get_master "$wds_vif")
+        if [ "$verify_br" != "$br" ]; then
+            log "ERROR: ${wds_vif} verify failed — expected ${br}, got ${verify_br:-none}"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Background watcher: polls every 30s for backhaul interfaces missing their
+# VLAN sub-interfaces. Handles initial boot (satellite connects later) and
+# satellite reboots while main is running.
+# ---------------------------------------------------------------------------
+WATCHER_PIDFILE="/tmp/vlan-bridge-watcher.pid"
+
+watch_backhaul() {
+    while true; do
+        sleep 30
+        # Always run setup — it is a no-op when interfaces exist in the
+        # correct bridge, but will repair interfaces that the kernel or
+        # firmware moved to the wrong bridge (race on backhaul reconnect).
+        local before
+        before=$(brctl show br0 br30 br40 2>/dev/null)
+
+        setup_backhaul_vlan "$IOT_BRIDGE" "$IOT_VLAN"
+        setup_backhaul_vlan "$GUEST_BRIDGE" "$GUEST_VLAN"
+
+        local after
+        after=$(brctl show br0 br30 br40 2>/dev/null)
+
+        # Only log bridge state when something changed.
+        [ "$before" != "$after" ] && log_bridge_state
+    done
+}
+
+log_bridge_state() {
+    log "br0  members: $(brctl show br0  2>/dev/null | awk 'NR>1 {print $NF}' | tr '\n' ' ')"
+    log "br40 members: $(brctl show br40 2>/dev/null | awk 'NR>1 {print $NF}' | tr '\n' ' ')"
+    log "br30 members: $(brctl show br30 2>/dev/null | awk 'NR>1 {print $NF}' | tr '\n' ' ')"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+log "=== start ==="
+
+# IoT (VLAN 40) -- required
+wait_for_ifaces "$IOT_IFACES" 90 || exit 1
+setup_vlan_iface "$IOT_VLAN"
+setup_bridge "$IOT_BRIDGE"
+assign_ifaces "$IOT_BRIDGE" "$IOT_VLAN" "$IOT_IFACES"
+setup_backhaul_vlan "$IOT_BRIDGE" "$IOT_VLAN"
+
+# Guest (VLAN 30) -- bridge and trunk always created; VAPs assigned if present
+setup_vlan_iface "$GUEST_VLAN"
+setup_bridge "$GUEST_BRIDGE"
+assign_ifaces "$GUEST_BRIDGE" "$GUEST_VLAN" "$GUEST_IFACES"
+setup_backhaul_vlan "$GUEST_BRIDGE" "$GUEST_VLAN"
+
+log_bridge_state
+log "=== done ==="
+
+# Kill any previous watcher before starting a new one (e.g. after wireless restart).
+if [ -f "$WATCHER_PIDFILE" ] && kill -0 "$(cat $WATCHER_PIDFILE)" 2>/dev/null; then
+    log "Stopping previous backhaul watcher (PID $(cat $WATCHER_PIDFILE))"
+    kill "$(cat $WATCHER_PIDFILE)" 2>/dev/null
+fi
+watch_backhaul &
+echo $! > "$WATCHER_PIDFILE"

@@ -1,0 +1,37 @@
+#!/bin/sh
+# =============================================================================
+# service-event-end  (SATELLITE / SECONDARY NODE)
+#
+# Location on router : /jffs/scripts/service-event-end
+# Called by          : Asuswrt-Merlin — after every service event completes
+#
+# Arguments (set by Merlin)
+# -------------------------
+#   $1  event  e.g. "restart", "start", "stop"
+#   $2  target e.g. "wireless", "firewall", "dnsmasq"
+#
+# What this does
+# --------------
+# When wireless restarts, re-runs vlan-bridge-setup to restore br40 / br30
+# and the VAP-drift watcher.
+#
+# NOTE on VAP numbering — AiMesh satellites differ from the wired root:
+#   Primary  (root): wl0.1 = IoT     wl0.2 = Guest
+#   Satellite:       wl0.1 = Main    wl0.2 = IoT     wl0.3 = Guest
+# Disabling indexes naively (e.g. ".2") on a satellite would kill the IoT
+# SSIDs — be careful copying logic from the primary's hook.
+# =============================================================================
+
+EVENT="$1"
+TARGET="$2"
+SETUP="/jffs/scripts/vlan-bridge-setup"
+
+if [ "$TARGET" = "wireless" ] && [ "$EVENT" != "stop" ]; then
+    logger -t service-event-end "Wireless restart detected — restoring VLAN bridges"
+
+    if [ -x "$SETUP" ]; then
+        "$SETUP" &
+    else
+        logger -t service-event-end "ERROR: $SETUP not found or not executable"
+    fi
+fi

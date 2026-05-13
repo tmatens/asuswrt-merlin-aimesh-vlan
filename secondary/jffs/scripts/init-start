@@ -1,0 +1,45 @@
+#!/bin/sh
+# =============================================================================
+# init-start  (SATELLITE / SECONDARY NODE)
+#
+# Location on router : /jffs/scripts/init-start
+# Called by          : Asuswrt-Merlin — very early in boot, before wireless
+#                      interfaces are initialized
+#
+# What this does
+# --------------
+# Pre-creates br40 and br30 before Merlin's wireless initialization runs.
+#
+# On AiMesh satellites, cfg_client manages wireless interface bridge
+# assignment directly — it does not defer to Merlin's lan_ifnames mechanism.
+# However, the NVRAM keys:
+#
+#   wl0.2_bridge=br40
+#   wl1.2_bridge=br40
+#   wl2.2_bridge=br40
+#
+# are honoured at wireless init time IF br40 already exists. Pre-creating it
+# here lets Merlin/AiMesh place the IoT VAPs directly into br40 (and Guest
+# VAPs into br30) rather than br0, avoiding disruptive brctl delif moves
+# after boot.
+#
+# NOTE: lan_ifnames has no effect on AiMesh satellites — confirmed
+# empirically: the primary SSIDs are correctly assigned to br0 by AiMesh
+# regardless of what lan_ifnames contains.
+#
+# NOTE: eth6.40 / eth6.30 are NOT created here because eth6 (the wireless
+# backhaul interface) does not exist yet at init-start time. That is handled
+# by services-start → vlan-bridge-setup once the backhaul comes up.
+# =============================================================================
+
+# Pre-create br40 so it exists when Merlin/AiMesh checks wl*.2_bridge=br40.
+brctl addbr br40  2>/dev/null
+brctl setfd br40 0
+brctl stp   br40 off
+ip link set br40 up
+
+# Pre-create br30 so it exists when Merlin/AiMesh checks wl*.3_bridge=br30.
+brctl addbr br30  2>/dev/null
+brctl setfd br30 0
+brctl stp   br30 off
+ip link set br30 up

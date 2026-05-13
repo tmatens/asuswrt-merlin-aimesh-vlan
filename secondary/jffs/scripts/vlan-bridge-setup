@@ -1,0 +1,267 @@
+#!/bin/sh
+# =============================================================================
+# vlan-bridge-setup  (SATELLITE / SECONDARY NODE)
+#
+# Location on router : /jffs/scripts/vlan-bridge-setup
+# Called by          : services-start (boot), service-event-end (wireless restart)
+#
+# What this does
+# --------------
+# Creates dedicated bridges for IoT and Guest traffic on a wireless-backhaul
+# satellite node:
+#   br40 -- IoT clients    (VLAN 40)
+#   br30 -- Guest clients  (VLAN 30)
+#
+# Tagged frames travel over the wireless backhaul trunk (eth6) to the root
+# node, which forwards them on the wired uplink to the managed switch and
+# upstream router.
+#
+# Bridge layout produced (defaults — edit IOT_*/GUEST_* below to change):
+#
+#   Main SSID    (wl0.1 / wl1.1        ) -> br0  -> eth6      (untagged, VLAN 1)
+#   Main-IoT     (wl0.2 / wl1.2 / wl2.2) -> br40 -> eth6.40   (VLAN 40 tagged)
+#   Main-Guest   (wl0.3 / wl1.3        ) -> br30 -> eth6.30   (VLAN 30 tagged)
+#   Backhaul SSID (wl2.1)                -> br0  -- managed by AiMesh, do not touch
+#   AiMesh internal (wl2.6)              -> br0  -- internal, do not touch
+#
+# Timing note
+# -----------
+# AiMesh syncs VAPs several minutes after boot — after the backhaul to the
+# root node stabilises. wait_for_ifaces polls until they appear.
+#
+# Drift note
+# ----------
+# AiMesh occasionally re-syncs satellites mid-runtime and silently moves
+# Guest/IoT VAPs back into br0. The watcher (watch_vaps) at the bottom polls
+# every 30 s and moves them back. Repair count is preserved in
+# /tmp/vlan-bridge-watcher.repairs so you can see how often this happens.
+# =============================================================================
+
+TRUNK="eth6"
+LOG="/tmp/vlan-bridge-setup.log"
+
+# --- VLAN definitions --------------------------------------------------------
+IOT_VLAN="40";   IOT_BRIDGE="br40";   IOT_IFACES="wl0.2 wl1.2 wl2.2"
+GUEST_VLAN="30"; GUEST_BRIDGE="br30"; GUEST_IFACES="wl0.3 wl1.3"
+
+log() { echo "[$(date '+%H:%M:%S')] vlan-bridge: $*" | tee -a "$LOG"; }
+
+# Return the bridge an interface belongs to (empty string if none).
+get_master() {
+    ip link show "$1" 2>/dev/null | grep -o 'master [^ ]*' | awk '{print $2}'
+}
+
+# ---------------------------------------------------------------------------
+# Wait for wireless interfaces to exist.
+# $1 = space-separated interface list, $2 = max wait seconds
+# ---------------------------------------------------------------------------
+wait_for_ifaces() {
+    local ifaces="$1" max="$2" waited=0
+    log "Waiting for interfaces: $ifaces"
+    while [ "$waited" -lt "$max" ]; do
+        local all=1
+        for iface in $ifaces; do
+            ip link show "$iface" >/dev/null 2>&1 || { all=0; break; }
+        done
+        [ "$all" = "1" ] && return 0
+        sleep 5
+        waited=$((waited + 5))
+    done
+    log "ERROR: Timed out after ${max}s waiting for: $ifaces"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Create a VLAN-tagged sub-interface on the trunk port.
+# $1 = VLAN id
+# ---------------------------------------------------------------------------
+setup_vlan_iface() {
+    local vlan="$1" viface="${TRUNK}.${1}"
+    if ! ip link show "$viface" >/dev/null 2>&1; then
+        log "Creating ${viface} (VLAN ${vlan} on ${TRUNK})"
+        ip link add link "$TRUNK" name "$viface" type vlan id "$vlan"
+    fi
+    ip link set "$viface" up
+}
+
+# ---------------------------------------------------------------------------
+# Create a bridge with STP disabled, add VLAN trunk as member.
+# $1 = bridge name, $2 = VLAN id
+# ---------------------------------------------------------------------------
+setup_bridge() {
+    local br="$1" vlan="$2"
+    if ! ip link show "$br" >/dev/null 2>&1; then
+        log "Creating bridge ${br}"
+        brctl addbr "$br"
+        brctl setfd "$br" 0
+        brctl stp  "$br" off
+    fi
+    ip link set "$br" up
+
+    local viface="${TRUNK}.${vlan}"
+    if ! brctl show "$br" 2>/dev/null | grep -q "${viface}"; then
+        log "Adding ${viface} to ${br}"
+        brctl addif "$br" "$viface"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Move wireless interfaces into the target bridge.  Handles any source
+# bridge (not just br0) and verifies placement afterwards.
+# $1 = bridge name, $2 = space-separated interface list
+# ---------------------------------------------------------------------------
+assign_ifaces() {
+    local br="$1" ifaces="$2"
+    for iface in $ifaces; do
+        if ! ip link show "$iface" >/dev/null 2>&1; then
+            log "WARN: ${iface} does not exist -- skipping"
+            continue
+        fi
+
+        local current_br
+        current_br=$(get_master "$iface")
+
+        if [ "$current_br" = "$br" ]; then
+            log "${iface} already in ${br} -- skipping"
+            continue
+        fi
+
+        if [ -n "$current_br" ]; then
+            log "Moving ${iface}: ${current_br} -> ${br}"
+            if ! brctl delif "$current_br" "$iface" 2>&1; then
+                log "ERROR: failed to remove ${iface} from ${current_br}"
+                continue
+            fi
+        fi
+
+        log "Adding ${iface} to ${br}"
+        if ! brctl addif "$br" "$iface" 2>&1; then
+            log "ERROR: failed to add ${iface} to ${br}"
+            continue
+        fi
+        ip link set "$iface" up
+
+        # Verify placement.
+        local verify_br
+        verify_br=$(get_master "$iface")
+        if [ "$verify_br" != "$br" ]; then
+            log "ERROR: ${iface} verify failed — expected ${br}, got ${verify_br:-none}"
+        fi
+    done
+}
+
+log_bridge_state() {
+    log "br0  members: $(brctl show br0  2>/dev/null | awk 'NR>1 {print $NF}' | tr '\n' ' ')"
+    log "br40 members: $(brctl show br40 2>/dev/null | awk 'NR>1 {print $NF}' | tr '\n' ' ')"
+    log "br30 members: $(brctl show br30 2>/dev/null | awk 'NR>1 {print $NF}' | tr '\n' ' ')"
+}
+
+# ---------------------------------------------------------------------------
+# Background watcher: polls every 30s for VAPs that have drifted out of their
+# expected bridge (typically back into br0 from AiMesh mid-runtime sync) and
+# repairs them.
+#
+# Logging
+# -------
+#   - "watcher: started"        once at boot/restart
+#   - "watcher: drift ..."      every drift detected (iface, current, expected)
+#   - "watcher: repaired ..."   every successful repair
+#   - "watcher: ERROR ..."      brctl failures or verify failures
+#   - "watcher: heartbeat ..."  hourly when no drift seen (with repair counter)
+#   - log_bridge_state          after any repair, so a snapshot is preserved
+#
+# Repair counter persists in /tmp across service-event-end re-invocations of
+# the script, so a fresh `cat /tmp/vlan-bridge-watcher.repairs` shows the
+# cumulative drift seen since the last reboot.
+# ---------------------------------------------------------------------------
+WATCHER_PIDFILE="/tmp/vlan-bridge-watcher.pid"
+WATCHER_REPAIRS="/tmp/vlan-bridge-watcher.repairs"
+WATCH_INTERVAL=30
+HEARTBEAT_INTERVAL=3600
+
+watch_vaps() {
+    local last_heartbeat=0
+    # iface:expected-bridge pairs
+    local pairs="wl0.2:${IOT_BRIDGE} wl1.2:${IOT_BRIDGE} wl2.2:${IOT_BRIDGE} wl0.3:${GUEST_BRIDGE} wl1.3:${GUEST_BRIDGE}"
+
+    log "watcher: started (interval=${WATCH_INTERVAL}s, heartbeat=${HEARTBEAT_INTERVAL}s)"
+    [ -f "$WATCHER_REPAIRS" ] || echo 0 > "$WATCHER_REPAIRS"
+
+    while true; do
+        sleep "$WATCH_INTERVAL"
+        local now drift=0
+        now=$(date +%s)
+
+        for pair in $pairs; do
+            local iface="${pair%:*}" expected="${pair#*:}" current verify
+            # Skip if iface does not exist yet (AiMesh still syncing).
+            ip link show "$iface" >/dev/null 2>&1 || continue
+
+            current=$(get_master "$iface")
+            [ "$current" = "$expected" ] && continue
+
+            drift=$((drift + 1))
+            log "watcher: drift — ${iface} is in ${current:-none}, expected ${expected}"
+
+            if [ -n "$current" ]; then
+                if ! brctl delif "$current" "$iface" 2>&1; then
+                    log "watcher: ERROR failed to remove ${iface} from ${current}"
+                    continue
+                fi
+            fi
+
+            if ! brctl addif "$expected" "$iface" 2>&1; then
+                log "watcher: ERROR failed to add ${iface} to ${expected}"
+                continue
+            fi
+            ip link set "$iface" up
+
+            verify=$(get_master "$iface")
+            if [ "$verify" = "$expected" ]; then
+                log "watcher: repaired ${iface} -> ${expected}"
+                local n
+                n=$(cat "$WATCHER_REPAIRS" 2>/dev/null)
+                echo $((${n:-0} + 1)) > "$WATCHER_REPAIRS"
+            else
+                log "watcher: ERROR repair verify failed — ${iface} in ${verify:-none}, expected ${expected}"
+            fi
+        done
+
+        [ "$drift" -gt 0 ] && log_bridge_state
+
+        if [ $((now - last_heartbeat)) -ge "$HEARTBEAT_INTERVAL" ]; then
+            local total
+            total=$(cat "$WATCHER_REPAIRS" 2>/dev/null)
+            log "watcher: heartbeat — all VAPs healthy (repairs since boot: ${total:-0})"
+            last_heartbeat=$now
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+log "=== start ==="
+
+# Create bridges and VLAN trunks immediately (no interfaces needed yet)
+setup_vlan_iface "$IOT_VLAN"
+setup_bridge "$IOT_BRIDGE" "$IOT_VLAN"
+setup_vlan_iface "$GUEST_VLAN"
+setup_bridge "$GUEST_BRIDGE" "$GUEST_VLAN"
+
+# Wait for IoT VAPs (required), then assign
+wait_for_ifaces "$IOT_IFACES" 180 && assign_ifaces "$IOT_BRIDGE" "$IOT_IFACES"
+
+# Wait for Guest VAPs (optional -- don't block IoT if these fail)
+wait_for_ifaces "$GUEST_IFACES" 180 && assign_ifaces "$GUEST_BRIDGE" "$GUEST_IFACES"
+
+log_bridge_state
+log "=== done ==="
+
+# Kill any previous watcher before starting a new one (e.g. after wireless restart).
+if [ -f "$WATCHER_PIDFILE" ] && kill -0 "$(cat $WATCHER_PIDFILE)" 2>/dev/null; then
+    log "Stopping previous VAP watcher (PID $(cat $WATCHER_PIDFILE))"
+    kill "$(cat $WATCHER_PIDFILE)" 2>/dev/null
+fi
+watch_vaps &
+echo $! > "$WATCHER_PIDFILE"

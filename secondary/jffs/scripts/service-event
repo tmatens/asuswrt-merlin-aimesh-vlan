@@ -1,0 +1,21 @@
+#!/bin/sh
+# =============================================================================
+# service-event  (SATELLITE / SECONDARY NODE)
+#
+# Location on router : /jffs/scripts/service-event
+# Called by          : Asuswrt-Merlin — before every service event (pre-hook)
+#
+# Intentionally a no-op. Two reasons:
+#
+# 1. service-event fires BEFORE Merlin acts, so bridge changes made here get
+#    immediately overwritten by Merlin's own restart logic.
+#
+# 2. On satellites, AiMesh manages wireless through its own internal sync
+#    from the root node, bypassing Merlin's service event mechanism entirely.
+#    Confirmed via boot-time logging: no wireless events appear in
+#    service-event during AiMesh initialisation. The pre-hook cannot
+#    intercept wireless init.
+#
+# Bridge restoration after wireless restarts is handled by service-event-end
+# (post-hook), which fires after Merlin completes the restart.
+# =============================================================================
