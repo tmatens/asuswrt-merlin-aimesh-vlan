@@ -72,6 +72,73 @@ Edit `IOT_VLAN` / `GUEST_VLAN` / `IOT_IFACES` / `GUEST_IFACES` at the top
 of each `vlan-bridge-setup` script if you want different VLAN IDs or
 different VAPs.
 
+## Backup and recovery — read before installing
+
+These scripts **overwrite** any files in `/jffs/scripts/` with the same
+names (`services-start`, `service-event`, `service-event-end`, plus
+`init-start` on satellites). If you have existing customisations there,
+they will be lost unless you back them up first.
+
+### What this code touches (and what it doesn't)
+
+- **Touches**: files under `/jffs/scripts/` on each node.
+- **Does NOT touch**: NVRAM. No `nvram set` or `nvram commit` calls. All
+  bridge/VLAN state is recreated at boot and after every
+  `restart_wireless`; a reboot of an untouched node always returns to
+  Merlin's default behaviour.
+- **Does NOT touch**: the primary SSID, the `br0` bridge that carries
+  management traffic, or your wired LAN. SSH access to the node continues
+  to work over the primary SSID and any wired port even if the scripts
+  misbehave.
+
+Because nothing is written to NVRAM, the worst realistic failure mode is
+"Guest or IoT SSIDs don't pass traffic correctly until you SSH in and
+remove the bad scripts." A factory reset is **not** required to recover.
+
+### Pre-install backup
+
+Before running the installer, snapshot existing `/jffs/scripts/` on every
+node and copy it off the router:
+
+```sh
+# On each node:
+ssh <user>@<node-ip> "tar -czf /jffs/backup-scripts-$(date +%Y%m%d).tgz /jffs/scripts/"
+
+# Then pull the backup onto your workstation so a router reset can't lose it:
+scp <user>@<node-ip>:/jffs/backup-scripts-*.tgz ./backups/
+```
+
+Keep the backup tarball until you've validated the new setup over at
+least one full `restart_wireless` cycle and one reboot.
+
+### Recovery procedure
+
+If after install your Guest/IoT SSIDs don't behave correctly, or you want
+to revert entirely:
+
+```sh
+# 1. SSH in (br0 / primary SSID is unchanged, so this still works):
+ssh <user>@<node-ip>
+
+# 2. Stop the watcher (if running) so it doesn't interfere:
+[ -f /tmp/vlan-bridge-watcher.pid ] && kill "$(cat /tmp/vlan-bridge-watcher.pid)"
+
+# 3. Restore the backup over /jffs/scripts/:
+cd / && tar -xzf /jffs/backup-scripts-YYYYMMDD.tgz
+
+# 4. Either restart wireless to undo the bridge layout immediately ...
+service restart_wireless
+
+# 5. ... or reboot for a fully clean state:
+reboot
+```
+
+If SSH is unavailable for some reason, the primary SSID and any wired LAN
+port still let you reach the node — these scripts never modify the
+default `br0` membership for those. As an absolute last resort, the
+hardware reset button performs a factory reset (note: this also wipes
+your AiMesh pairing).
+
 ## Install
 
 Requirements:
@@ -80,6 +147,7 @@ Requirements:
 - JFFS enabled and script execution enabled in the Merlin UI
   (System → Administration).
 - SSH key access to the node (recommended).
+- **Backup taken** as described above.
 
 Two ways:
 
@@ -88,6 +156,8 @@ Two ways:
 ```sh
 git clone https://github.com/tmatens/asuswrt-merlin-aimesh-vlan.git
 cd asuswrt-merlin-aimesh-vlan
+
+# Step 0: take backups (see "Pre-install backup" above) — do not skip.
 
 # Edit IOT_VLAN / GUEST_VLAN / IOT_IFACES / GUEST_IFACES in:
 #   main/jffs/scripts/vlan-bridge-setup
@@ -108,6 +178,7 @@ ssh admin@192.168.1.2 reboot
 
 `scp` the contents of `main/jffs/scripts/` or `secondary/jffs/scripts/` to
 `/jffs/scripts/` on the appropriate node, `chmod +x` everything, and reboot.
+Take the backup described above first.
 
 ## Verify
 
