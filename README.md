@@ -54,11 +54,20 @@ VAP indexes.
 
 ## What this does NOT do
 
+- **Does not change your existing SSIDs, PSKs, or wireless security
+  settings.** Those live in NVRAM, which this code never writes to. All
+  this code does is change which Linux bridge each VAP belongs to so its
+  traffic exits on a VLAN-tagged trunk port. Configure SSIDs the normal
+  way in the Asus/Merlin UI; this code routes them.
+- Does not write to NVRAM at all. All bridge/VLAN state is recreated at
+  boot and after every `restart_wireless`, so a reboot without these
+  scripts in `/jffs/scripts/` returns the node to Merlin's stock
+  behaviour. No factory reset ever needed to revert.
 - Does not configure your upstream router, switch, DHCP, or firewall.
 - Does not provide L3 isolation between VLANs — that's your upstream
   router's job.
-- Does not write to NVRAM. All state is recreated at boot and after every
-  `restart_wireless`.
+- Does not handle IPv6 routing or filtering. Same rule: handled upstream.
+  This code operates entirely at L2.
 
 ## Defaults
 
@@ -165,6 +174,15 @@ Requirements:
   (System → Administration).
 - SSH key access to the node (recommended).
 - **Backup taken** as described above.
+- **Guest and IoT SSIDs already created and enabled** in the Asus/Merlin
+  UI. This code routes their VAPs to VLAN bridges; it does **not** create
+  the SSIDs themselves. Confirm your VAP indexes match the script defaults
+  (`IOT_IFACES` / `GUEST_IFACES` at the top of each `vlan-bridge-setup`);
+  [`docs/topology.md`](docs/topology.md) has a one-liner that prints every
+  configured VAP and its SSID name via `nvram get`.
+- *(Untested)* If you use Asus's newer "Guest Network Pro" / "AiMesh Guest"
+  feature, the scripts have not been validated against it. The classic
+  per-band Guest SSID setup is what's tested.
 
 Two ways:
 
@@ -200,6 +218,8 @@ modern OpenSSH clients — see "A note on `scp -O`" above.)
 
 ## Verify
 
+### 1. L2 plumbing on the AP
+
 After reboot:
 
 ```sh
@@ -214,6 +234,22 @@ ssh admin@<node-ip> "
 You should see `br40` and `br30` populated with the right VAPs, and the
 watcher running with 0–few repairs. See [`docs/operations.md`](docs/operations.md)
 for healthy vs. unhealthy examples.
+
+### 2. End-to-end with a real client
+
+`brctl show` only proves the AP's bridge layout is correct. The real test
+is whether a client on each SSID gets a DHCP lease from the right scope:
+
+- **Guest SSID** → client should get an IP in your VLAN 30 subnet
+  (e.g. `192.168.30.x`).
+- **IoT SSID** → client should get an IP in your VLAN 40 subnet
+  (e.g. `192.168.40.x`).
+
+A phone is the easiest test client. If `brctl show` looks correct but
+DHCP returns an IP from the LAN scope (VLAN 1) instead, the problem is
+**upstream** of the AP — most likely the trunk port on your managed
+switch isn't tagging VLAN 30/40, or your upstream router has no DHCP
+scope on those VLANs. Nothing more to fix on the AP side.
 
 ## Extras
 
