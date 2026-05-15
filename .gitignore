@@ -2,3 +2,7 @@
 *.bak
 *~
 .DS_Store
+
+# Local-only operational artifacts (e.g. pre-install backup tarballs from
+# production nodes) — do not publish.
+/backups/
