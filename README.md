@@ -104,9 +104,26 @@ node and copy it off the router:
 # On each node:
 ssh <user>@<node-ip> "tar -czf /jffs/backup-scripts-$(date +%Y%m%d).tgz /jffs/scripts/"
 
-# Then pull the backup onto your workstation so a router reset can't lose it:
-scp <user>@<node-ip>:/jffs/backup-scripts-*.tgz ./backups/
+# Then pull the backup onto your workstation so a router reset can't lose it.
+# Note the `-O` flag: see "A note on scp -O" below.
+scp -O <user>@<node-ip>:/jffs/backup-scripts-*.tgz ./backups/
 ```
+
+#### A note on `scp -O`
+
+OpenSSH 9.0 (Apr 2022) changed `scp`'s default transport from the legacy
+SCP protocol to SFTP. Asuswrt-Merlin uses dropbear, which does **not**
+ship an sftp-server, so the default fails with:
+
+```
+sh: /opt/libexec/sftp-server: not found
+scp: Connection closed
+```
+
+The `-O` flag forces the legacy SCP protocol, which dropbear supports.
+`tools/install.sh` already passes `-O` internally; you only need to add
+it to any manual `scp` commands you run against the nodes (like the
+backup line above, and the manual install path below).
 
 Keep the backup tarball until you've validated the new setup over at
 least one full `restart_wireless` cycle and one reboot.
@@ -176,9 +193,10 @@ ssh admin@192.168.1.2 reboot
 
 ### Manually
 
-`scp` the contents of `main/jffs/scripts/` or `secondary/jffs/scripts/` to
+`scp -O` the contents of `main/jffs/scripts/` or `secondary/jffs/scripts/` to
 `/jffs/scripts/` on the appropriate node, `chmod +x` everything, and reboot.
-Take the backup described above first.
+Take the backup described above first. (The `-O` flag is required for
+modern OpenSSH clients — see "A note on `scp -O`" above.)
 
 ## Verify
 

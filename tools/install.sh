@@ -44,10 +44,14 @@ echo
 
 # Copy each file. Some routers' scp is busybox and refuses recursive copies,
 # so we list explicitly.
+#
+# -O forces the legacy SCP protocol. OpenSSH 9.0+ defaults to SFTP, but
+# dropbear (Asuswrt-Merlin's SSH server) ships without an sftp-server, so
+# the default transport fails with "sh: /opt/libexec/sftp-server: not found".
 for f in "$SRC_DIR"/*; do
     name=$(basename "$f")
     echo "  -> $name"
-    scp -q "$f" "${SSH_USER}@${HOST}:/jffs/scripts/$name"
+    scp -qO "$f" "${SSH_USER}@${HOST}:/jffs/scripts/$name"
 done
 
 echo
