@@ -93,6 +93,25 @@ ok()    { echo -e "${GREEN}[ok]${NC}    $*"; }
 warn()  { echo -e "${YELLOW}[warn]${NC}  $*"; }
 err()   { echo -e "${RED}[error]${NC} $*" >&2; }
 
+# Interface names come from the environment (MAIN_IFACES/SECONDARY_IFACES) and
+# are interpolated into the command strings we run on the router over SSH
+# (e.g. "wl -i ${iface} ap_isolate 0"). Reject anything outside a strict
+# allowlist so a crafted value such as 'wl0.1$(reboot)' or 'wl0.1; rm -rf /'
+# cannot inject commands onto the router. Real VAP names are just letters,
+# digits and '.' (e.g. wl0.1); '_' and '-' are allowed for other iface styles.
+validate_ifaces() {
+    local label="$1" ifaces="$2" iface
+    for iface in $ifaces; do
+        case "$iface" in
+            *[!a-zA-Z0-9._-]*)
+                err "Invalid interface name in ${label}: '${iface}'"
+                err "Allowed characters: letters, digits, '.', '_', '-'"
+                exit 1
+                ;;
+        esac
+    done
+}
+
 ssh_cmd() {
     # $1 = host, $2 = command string
     ssh $SSH_OPTS "${SSH_USER}@${1}" "$2"
@@ -194,6 +213,9 @@ show_status() {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+validate_ifaces "MAIN_IFACES"      "$MAIN_IFACES"
+validate_ifaces "SECONDARY_IFACES" "$SECONDARY_IFACES"
+
 case "$ACTION" in
     disable)
         echo ""
