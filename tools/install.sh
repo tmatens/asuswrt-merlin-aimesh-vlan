@@ -54,6 +54,19 @@ for f in "$SRC_DIR"/*; do
     scp -qO "$f" "${SSH_USER}@${HOST}:/jffs/scripts/$name"
 done
 
+# Optional per-node config (e.g. vlan-bridge.conf) from <role>/jffs/configs/.
+CONF_DIR="$(dirname "$SRC_DIR")/configs"
+if [ -d "$CONF_DIR" ] && [ -n "$(ls -A "$CONF_DIR")" ]; then
+    echo
+    echo "Installing configs from ${CONF_DIR} to /jffs/configs/"
+    ssh "${SSH_USER}@${HOST}" "mkdir -p /jffs/configs"
+    for f in "$CONF_DIR"/*; do
+        name=$(basename "$f")
+        echo "  -> $name"
+        scp -qO "$f" "${SSH_USER}@${HOST}:/jffs/configs/$name"
+    done
+fi
+
 echo
 echo "Setting executable bit on /jffs/scripts/*"
 ssh "${SSH_USER}@${HOST}" "chmod +x /jffs/scripts/*"
