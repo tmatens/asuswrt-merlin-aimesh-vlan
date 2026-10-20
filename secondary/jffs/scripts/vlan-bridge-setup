@@ -7,22 +7,33 @@
 #
 # What this does
 # --------------
-# Creates dedicated bridges for IoT and Guest traffic on a wireless-backhaul
-# satellite node:
+# Creates dedicated bridges for IoT and Guest traffic on a satellite node:
 #   br40 -- IoT clients    (VLAN 40)
 #   br30 -- Guest clients  (VLAN 30)
 #
-# Tagged frames travel over the wireless backhaul trunk (eth6) to the root
-# node, which forwards them on the wired uplink to the managed switch and
-# upstream router.
+# Tagged frames travel over whichever interface AiMesh is currently using as
+# the backhaul -- the "trunk". On a wireless backhaul that is the uplink radio
+# (eth6 here) and the root node forwards the tags to the managed switch; on a
+# wired backhaul (Ethernet, MoCA) it is the WAN port (eth0) and the switch port
+# it lands on must carry the VLANs tagged.
 #
-# Bridge layout produced (defaults — edit IOT_*/GUEST_* below to change):
+# Bridge layout produced (defaults — edit IOT_*/GUEST_* below to change),
+# <trunk> being the active backhaul interface:
 #
-#   Main SSID    (wl0.1 / wl1.1        ) -> br0  -> eth6      (untagged, VLAN 1)
-#   Main-IoT     (wl0.2 / wl1.2 / wl2.2) -> br40 -> eth6.40   (VLAN 40 tagged)
-#   Main-Guest   (wl0.3 / wl1.3        ) -> br30 -> eth6.30   (VLAN 30 tagged)
+#   Main SSID    (wl0.1 / wl1.1        ) -> br0  -> <trunk>     (untagged, VLAN 1)
+#   Main-IoT     (wl0.2 / wl1.2 / wl2.2) -> br40 -> <trunk>.40  (VLAN 40 tagged)
+#   Main-Guest   (wl0.3 / wl1.3        ) -> br30 -> <trunk>.30  (VLAN 30 tagged)
 #   Backhaul SSID (wl2.1)                -> br0  -- managed by AiMesh, do not touch
 #   AiMesh internal (wl2.6)              -> br0  -- internal, do not touch
+#
+# Trunk note
+# ----------
+# The trunk is not fixed: AiMesh moves the backhaul between the wire and the
+# radios on its own (cable plugged/unplugged, "Auto" priority falling back to
+# wireless), and records the active interface in nvram `amas_ifname`. The
+# script reads it at start, and the watcher re-homes br40/br30 onto the new
+# trunk when it changes -- otherwise Guest/IoT would stay pinned to a dead
+# uplink while the main SSID carries on working.
 #
 # Timing note
 # -----------
@@ -37,7 +48,12 @@
 # /tmp/vlan-bridge-watcher.repairs so you can see how often this happens.
 # =============================================================================
 
-TRUNK="eth6"
+# Used only when nvram `amas_ifname` stays empty (or names a missing interface)
+# for the whole startup wait (see wait_for_trunk). TRUNK itself is set in Main and updated by the watcher.
+DEFAULT_TRUNK="eth6"
+# The node's wired backhaul port (WAN port). Only used to grade the syslog
+# marker when the backhaul moves -- see the watcher.
+WIRED_TRUNK="eth0"
 LOG="/tmp/vlan-bridge-setup.log"
 
 # --- VLAN definitions --------------------------------------------------------
@@ -111,6 +127,54 @@ wait_for_ifaces() {
 }
 
 # ---------------------------------------------------------------------------
+# Echo the interface AiMesh is using as the backhaul right now, or nothing
+# when it cannot be told. nvram `amas_ifname` goes EMPTY for 15-30 s whenever
+# AiMesh re-evaluates the backhaul (wireless restart, priority change), so
+# "unknown" must never be read as "the default radio": that parks Guest/IoT on
+# a dead trunk and reports a fallback that did not happen.
+# ---------------------------------------------------------------------------
+detect_trunk() {
+    local t
+    t=$(nvram get amas_ifname 2>/dev/null)
+    [ -n "$t" ] && ip link show "$t" >/dev/null 2>&1 && echo "$t"
+}
+
+# ---------------------------------------------------------------------------
+# Startup: wait for AiMesh to name its backhaul, then fall back to the default.
+# $1 = max wait seconds
+# ---------------------------------------------------------------------------
+wait_for_trunk() {
+    local max="$1" waited=0 t
+    while [ "$waited" -lt "$max" ]; do
+        t=$(detect_trunk)
+        [ -n "$t" ] && { echo "$t"; return 0; }
+        sleep 5
+        waited=$((waited + 5))
+    done
+    echo "$DEFAULT_TRUNK"
+}
+
+# ---------------------------------------------------------------------------
+# Drop VLAN sub-interfaces left on a previous trunk. Must run BEFORE the new
+# one is added: two trunks in one bridge join the wire and the radio uplink
+# into a loop, and these bridges run with STP off.
+# $1 = bridge name, $2 = VLAN id
+# ---------------------------------------------------------------------------
+remove_stale_trunks() {
+    local br="$1" vlan="$2" m
+    for m in $(ls "/sys/class/net/${br}/brif" 2>/dev/null); do
+        case "$m" in
+            "${TRUNK}.${vlan}") ;;
+            eth*."${vlan}")
+                log "Removing stale trunk ${m} from ${br} (trunk is now ${TRUNK})"
+                brctl delif "$br" "$m" 2>&1
+                ip link del "$m" 2>&1
+                ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------------
 # Create a VLAN-tagged sub-interface on the trunk port.
 # $1 = VLAN id
 # ---------------------------------------------------------------------------
@@ -136,6 +200,8 @@ setup_bridge() {
         brctl stp  "$br" off
     fi
     ip link set "$br" up
+
+    remove_stale_trunks "$br" "$vlan"
 
     local viface="${TRUNK}.${vlan}"
     if ! brctl show "$br" 2>/dev/null | grep -q "${viface}"; then
@@ -218,6 +284,8 @@ WATCH_INTERVAL=10
 HEARTBEAT_INTERVAL=3600
 # Syslog markers, separate from the local-log heartbeat above:
 #   vlan1_drift sev=crit ...  -> drift detected (unexpected; collector alerts)
+#   vlan_trunk_change ...     -> backhaul moved and the VLAN trunks followed;
+#                                carries sev=warn only when it LEFT the wired port
 #   vlan_watch_hb ...         -> every SYSLOG_HB_INTERVAL; the collector alerts
 #                                on ABSENCE (watcher dead / jffs wiped / AP
 #                                down / syslog path broken)
@@ -231,10 +299,38 @@ watch_vaps() {
     logger -t vlan-watch "vlan_watch_hb hb=vlan-watch"
     [ -f "$WATCHER_REPAIRS" ] || echo 0 > "$WATCHER_REPAIRS"
 
+    local trunk_now trunk_pending=""
+
     while true; do
         sleep "$WATCH_INTERVAL"
         local now drift=0 pairs="" i
         now=$(date +%s)
+
+        # Follow the backhaul. A new trunk must be seen on two consecutive
+        # passes before acting, so a backhaul that is still flapping between
+        # candidates does not drag the bridges along with every bounce.
+        trunk_now=$(detect_trunk)
+        if [ -z "$trunk_now" ] || [ "$trunk_now" = "$TRUNK" ]; then
+            trunk_pending=""
+        elif [ "$trunk_now" != "$trunk_pending" ]; then
+            trunk_pending="$trunk_now"
+        else
+            log "watcher: backhaul moved ${TRUNK} -> ${trunk_now}, re-homing VLAN trunks"
+            # Leaving the wired port is a degradation someone should hear about
+            # (dead cable/coax, unplugged adapter): mark it sev=warn so the
+            # collector alerts. Moves back to the wire, or between radios, are
+            # logged without a severity.
+            if [ "$TRUNK" = "$WIRED_TRUNK" ]; then
+                logger -t vlan-watch "vlan_trunk_change sev=warn iface=${trunk_now} from=${TRUNK}"
+            else
+                logger -t vlan-watch "vlan_trunk_change iface=${trunk_now} from=${TRUNK}"
+            fi
+            TRUNK="$trunk_now"
+            trunk_pending=""
+            setup_vlan_iface "$IOT_VLAN";   setup_bridge "$IOT_BRIDGE" "$IOT_VLAN"
+            setup_vlan_iface "$GUEST_VLAN"; setup_bridge "$GUEST_BRIDGE" "$GUEST_VLAN"
+            log_bridge_state
+        fi
 
         # Build iface:expected-bridge pairs dynamically each pass, by SSID, so the
         # watcher tracks whatever IoT/Guest VAPs currently exist (bands on/off, re-index).
@@ -298,6 +394,9 @@ watch_vaps() {
 # Main
 # ---------------------------------------------------------------------------
 log "=== start ==="
+
+TRUNK=$(wait_for_trunk 60)
+log "Trunk (active backhaul): ${TRUNK}"
 
 # Create bridges and VLAN trunks immediately (no interfaces needed yet)
 setup_vlan_iface "$IOT_VLAN"

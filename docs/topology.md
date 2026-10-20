@@ -41,6 +41,11 @@ These are the values baked into the scripts. Edit the scripts (search for
 | 30   | Guest   | br30   | eth0.30                | eth6.30                     |
 | 40   | IoT     | br40   | eth0.40                | eth6.40                     |
 
+The satellite column shows a wireless backhaul. On a wired backhaul (Ethernet
+or MoCA into the satellite's WAN port) the trunk is `eth0` instead, and the
+switch port it lands on must carry the VLANs tagged. The satellite script
+follows the active backhaul (nvram `amas_ifname`) by itself.
+
 ## Default SSID → bridge map
 
 ### Root node

@@ -9,8 +9,9 @@ Drop-in `/jffs/scripts/` for Asuswrt-Merlin nodes (Asus AiMesh-capable APs)
 that:
 
 - Creates dedicated bridges (`br30`, `br40`) for Guest and IoT SSIDs.
-- Tags their traffic out a trunk port (`eth0` on the wired root, `eth6` on
-  wireless-backhaul satellites) for an upstream router/firewall to handle.
+- Tags their traffic out a trunk port (`eth0` on the wired root; on satellites,
+  whichever interface AiMesh is using as the backhaul — `eth6` wireless, `eth0`
+  wired — followed live as it changes) for an upstream router/firewall to handle.
 - **Survives `service restart_wireless`** via a `service-event-end` post-hook.
 - **Survives AiMesh mid-runtime VAP re-syncs** via a 10 s drift watcher
   that moves VAPs back to the correct bridge when AiMesh dumps them into
@@ -266,7 +267,7 @@ scope on those VLANs. Nothing more to fix on the AP side.
 
 The watcher is the thing standing between you and Guest/IoT clients
 quietly landing on your trusted LAN — so it's worth knowing (a) when it
-had to act, and (b) that it's still alive at all. The scripts emit three
+had to act, and (b) that it's still alive at all. The scripts emit four
 syslog markers for exactly this (plain `logger` lines — they cost nothing
 and need no extra software on the node):
 
@@ -274,6 +275,7 @@ and need no extra software on the node):
 |--------|------|---------|
 | `vlan1_drift sev=crit vap=… from=… to=…` | a VAP (or backhaul sub-interface) was found outside its bridge mid-runtime | a real, seconds-long VLAN-1 leak occurred and was repaired — one-off after an AiMesh sync is normal, repeats deserve a look |
 | `vlan_watch_restart sev=warn reason=watcher-dead` | the guard cron relaunched a dead watcher | protection ran unwatched for up to 5 minutes |
+| `vlan_trunk_change [sev=warn] iface=… from=…` | satellite only: AiMesh moved the backhaul and the Guest/IoT trunks followed it | `sev=warn` is present only when the node **left its wired port** for a radio — dead cable/coax or an unplugged adapter; the mesh keeps working on the wireless fallback, slower. Without `sev` (back onto the wire, or radio to radio) it is informational |
 | `vlan_watch_hb hb=vlan-watch` | every 5 minutes per node | heartbeat — its **absence** means the watcher died, `/jffs` was wiped (an AiMesh node re-add does this), the AP is down, or syslog forwarding broke |
 
 Boot-time bridge moves are expected (Merlin rebuilds `br0` from NVRAM at

@@ -36,8 +36,10 @@ background. The setup script:
 
 - waits for the relevant `wlN.M` interfaces to appear,
 - creates `brXX` bridges for each VLAN,
-- creates VLAN-tagged sub-interfaces on the trunk (`eth0` on the root,
-  `eth6` — the wireless backhaul — on satellites),
+- creates VLAN-tagged sub-interfaces on the trunk (`eth0` on the root; on
+  satellites the active backhaul from nvram `amas_ifname` — `eth6` on a
+  wireless backhaul, `eth0` on a wired one — re-homed by the watcher when
+  AiMesh moves the backhaul),
 - moves the right VAPs out of `br0` and into their VLAN bridge.
 
 On satellites, `/jffs/scripts/init-start` pre-creates the bridges *before*
