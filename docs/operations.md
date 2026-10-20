@@ -91,6 +91,21 @@ Heartbeats every hour confirm all monitored bands are still up:
 2026-05-12 14:20:22 — heartbeat: wds0.0.1=up wds1.0.1=up wds2.0.1=up
 ```
 
+With *Ethernet Backhaul Mode* on (nvram `amas_eap_bhmode` non-zero) there are no
+`wds` interfaces, so the monitor switches to the wired path: it counts AiMesh
+nodes (MACs in nvram `cfg_device_list`) that are LLDP neighbours on an Ethernet
+port, and declares the backhaul down after 30 s without any. The log shows the
+mode it picked, and the heartbeat reports the node count:
+
+```
+2026-05-12 06:23:07 — backhaul mode: unknown -> wired
+2026-05-12 07:23:07 — heartbeat: mode=wired nodes_seen=1
+```
+
+Either way, the transition into "all down" emits one
+`BACKHAUL_DOWN sev=warn ... detail=all_wds_links_down|no_wired_node_lldp` syslog
+marker, and the WARNING line repeats every 5 minutes while the outage lasts.
+
 A short flap (under a minute) every few days is common in AiMesh as the
 controller reselects backhaul bands. Sustained outages are worth tracing.
 

@@ -304,7 +304,9 @@ instead of within 15 minutes.
   NVRAM.
 - **`main/jffs/scripts/monitor-backhaul.sh`** — logs `wds*.0.1` link
   transitions on the wired root, so you can correlate satellite outages
-  with backhaul flaps.
+  with backhaul flaps. With AiMesh *Ethernet Backhaul Mode* on it watches
+  the wired path instead (AiMesh nodes seen as LLDP neighbours over
+  Ethernet), since the `wds` links no longer exist.
 
 ## Tested on
 
