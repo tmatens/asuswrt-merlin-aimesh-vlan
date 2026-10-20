@@ -214,13 +214,21 @@ log_bridge_state() {
 # ---------------------------------------------------------------------------
 WATCHER_PIDFILE="/tmp/vlan-bridge-watcher.pid"
 WATCHER_REPAIRS="/tmp/vlan-bridge-watcher.repairs"
-WATCH_INTERVAL=30
+WATCH_INTERVAL=10
 HEARTBEAT_INTERVAL=3600
+# Syslog markers, separate from the local-log heartbeat above:
+#   vlan1_drift sev=crit ...  -> drift detected (unexpected; collector alerts)
+#   vlan_watch_hb ...         -> every SYSLOG_HB_INTERVAL; the collector alerts
+#                                on ABSENCE (watcher dead / jffs wiped / AP
+#                                down / syslog path broken)
+SYSLOG_HB_INTERVAL=300
 
 watch_vaps() {
-    local last_heartbeat=0
+    local last_heartbeat=0 last_syslog_hb
+    last_syslog_hb=$(date +%s)
 
     log "watcher: started (interval=${WATCH_INTERVAL}s, heartbeat=${HEARTBEAT_INTERVAL}s)"
+    logger -t vlan-watch "vlan_watch_hb hb=vlan-watch"
     [ -f "$WATCHER_REPAIRS" ] || echo 0 > "$WATCHER_REPAIRS"
 
     while true; do
@@ -243,6 +251,8 @@ watch_vaps() {
 
             drift=$((drift + 1))
             log "watcher: drift — ${iface} is in ${current:-none}, expected ${expected}"
+            logger -t vlan-watch \
+                "vlan1_drift sev=crit vap=${iface} from=${current:-none} to=${expected}"
 
             if [ -n "$current" ]; then
                 if ! brctl delif "$current" "$iface" 2>&1; then
@@ -275,6 +285,11 @@ watch_vaps() {
             total=$(cat "$WATCHER_REPAIRS" 2>/dev/null)
             log "watcher: heartbeat — all VAPs healthy (repairs since boot: ${total:-0})"
             last_heartbeat=$now
+        fi
+
+        if [ $((now - last_syslog_hb)) -ge "$SYSLOG_HB_INTERVAL" ]; then
+            logger -t vlan-watch "vlan_watch_hb hb=vlan-watch"
+            last_syslog_hb=$now
         fi
     done
 }
@@ -313,3 +328,9 @@ if [ -f "$WATCHER_PIDFILE" ] && kill -0 "$(cat $WATCHER_PIDFILE)" 2>/dev/null; t
 fi
 watch_vaps &
 echo $! > "$WATCHER_PIDFILE"
+
+# Self-healing: ensure the guard cron exists — it relaunches this
+# script if the watcher dies. Registered here (not only in services-start) so
+# a manual run after a jffs restore also arms it. cru add is replace-by-id.
+[ -x /jffs/scripts/vlan-watch-guard ] && \
+    cru a vlan-watch-guard "*/5 * * * * /jffs/scripts/vlan-watch-guard"

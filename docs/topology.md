@@ -64,8 +64,9 @@ These are the values baked into the scripts. Edit the scripts (search for
 **Note the index shift.** On the root, `wl0` is the primary SSID. On a
 satellite, AiMesh uses `wl0` for the backhaul probe and `wl0.1` for the
 primary SSID, pushing IoT to `wl0.2` and Guest to `wl0.3`. The scripts
-hardcode this difference. If your AiMesh assigns indexes differently, edit
-`IOT_IFACES` / `GUEST_IFACES` near the top of each `vlan-bridge-setup`.
+handle this automatically: VAPs are discovered **by SSID name**
+(`IOT_SSID` / `GUEST_SSID` near the top of each `vlan-bridge-setup`), so
+the index shift never needs configuring.
 
 ## Verifying VAP-to-SSID mapping on your nodes
 
@@ -78,5 +79,5 @@ for iface in wl0 wl0.1 wl0.2 wl0.3 wl1 wl1.1 wl1.2 wl1.3 wl2 wl2.1 wl2.2 wl2.3; 
 done
 ```
 
-That list is what the scripts assume. Adjust the `IOT_IFACES` /
-`GUEST_IFACES` constants in `vlan-bridge-setup` to match.
+Set the `IOT_SSID` / `GUEST_SSID` constants in `vlan-bridge-setup` to the
+SSID names shown — the scripts discover the matching VAPs at runtime.

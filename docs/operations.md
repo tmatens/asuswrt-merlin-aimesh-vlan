@@ -66,8 +66,11 @@ roaming or topology changes, and each one can briefly drop VAPs into `br0`.
 A repair count that climbs continuously (e.g. tens of repairs per hour)
 means something is fighting the watcher. Most likely causes:
 
-- Wrong VAP→bridge mapping in `IOT_IFACES` / `GUEST_IFACES`; the watcher
-  keeps moving an interface AiMesh keeps moving back.
+- An `IOT_SSID` / `GUEST_SSID` value matching the wrong SSID (e.g. two
+  SSIDs sharing a name); the watcher keeps moving an interface AiMesh
+  keeps moving back. Each mid-runtime repair also emits a
+  `vlan1_drift sev=crit` syslog marker, so a climbing count is visible in
+  your log collector too (see the README's Monitoring section).
 - An NVRAM `wlN.M_bridge` value pointing somewhere the watcher disagrees
   with.
 

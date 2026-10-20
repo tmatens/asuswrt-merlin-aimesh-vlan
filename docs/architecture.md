@@ -59,11 +59,23 @@ setup script a clean slate to operate on.
 
 ### 3. Background drift watcher
 
-The setup script forks a watcher that polls every 30 s and checks whether
+The setup script forks a watcher that polls every 10 s and checks whether
 each VAP is in its expected bridge. If not, it `brctl delif` from the wrong
 bridge and `brctl addif` into the right one, then verifies. Repair count is
 preserved in `/tmp/vlan-bridge-watcher.repairs` so you can quantify how
 often AiMesh causes drift.
+
+Two supporting pieces keep the watcher honest:
+
+- **`vlan-watch-guard`** (cru cron, every 5 min) relaunches the setup
+  script if the watcher process has died, so a crashed watcher self-heals
+  instead of leaving the drift protection silently absent.
+- **Syslog markers** — mid-runtime repairs emit `vlan1_drift sev=crit`,
+  guard restarts emit `vlan_watch_restart sev=warn`, and the watcher
+  heartbeats `vlan_watch_hb` every 5 min. Forwarded syslog + an
+  absence-of-heartbeat alert catches the one failure nothing else can:
+  the watcher (and guard) being gone entirely, e.g. after an AiMesh node
+  re-add wipes `/jffs`. Boot-time moves are expected and emit no marker.
 
 The watcher is essential on AiMesh satellites — without it, mid-runtime VAP
 re-syncs leak Guest/IoT clients onto VLAN 1 until the next reboot or

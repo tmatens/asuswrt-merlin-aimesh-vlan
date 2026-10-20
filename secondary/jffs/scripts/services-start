@@ -24,3 +24,8 @@ if [ -x "$SETUP" ]; then
 else
     logger -t services-start "ERROR: $SETUP not found or not executable"
 fi
+
+# Self-healing guard cron: relaunches vlan-bridge-setup if the
+# watcher dies. Also registered by vlan-bridge-setup itself (replace-by-id).
+GUARD="/jffs/scripts/vlan-watch-guard"
+[ -x "$GUARD" ] && cru a vlan-watch-guard "*/5 * * * * $GUARD"

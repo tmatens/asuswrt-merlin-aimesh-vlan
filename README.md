@@ -12,11 +12,18 @@ that:
 - Tags their traffic out a trunk port (`eth0` on the wired root, `eth6` on
   wireless-backhaul satellites) for an upstream router/firewall to handle.
 - **Survives `service restart_wireless`** via a `service-event-end` post-hook.
-- **Survives AiMesh mid-runtime VAP re-syncs** via a 30 s drift watcher
+- **Survives AiMesh mid-runtime VAP re-syncs** via a 10 s drift watcher
   that moves VAPs back to the correct bridge when AiMesh dumps them into
   `br0`.
 - **Survives backhaul reconnects** by recreating VLAN sub-interfaces on each
   backhaul band (`wds*.0.1`) when they reappear.
+- **Survives its own death**: a `vlan-watch-guard` cron relaunches the
+  watcher within 5 minutes if it ever dies.
+- **Tells you when it acted** (optional): drift repairs and a periodic
+  heartbeat are emitted to syslog, so if you forward the node's syslog
+  anywhere (Loki, rsyslog, …) you can alert both on leaks *and* on the
+  watcher itself silently disappearing. See
+  [Monitoring & alerting](#monitoring--alerting-optional).
 
 If you've ever set up VLANs by hand on a Merlin AP, watched them disappear
 the next time you toggled a wireless setting, and given up — this is the
@@ -77,9 +84,12 @@ VAP indexes.
 | 30   | Guest          | br30 |
 | 40   | IoT            | br40 |
 
-Edit `IOT_VLAN` / `GUEST_VLAN` / `IOT_IFACES` / `GUEST_IFACES` at the top
-of each `vlan-bridge-setup` script if you want different VLAN IDs or
-different VAPs.
+VAPs are discovered dynamically **by SSID name** — the scripts match
+whatever interfaces currently serve `IOT_SSID` / `GUEST_SSID`, so band
+toggles and per-node VAP-index differences (root vs. satellite) need no
+per-node interface lists. Edit `IOT_VLAN` / `GUEST_VLAN` / `IOT_SSID` /
+`GUEST_SSID` at the top of each `vlan-bridge-setup` script to match your
+network.
 
 ## Backup and recovery — read before installing
 
@@ -176,10 +186,11 @@ Requirements:
 - **Backup taken** as described above.
 - **Guest and IoT SSIDs already created and enabled** in the Asus/Merlin
   UI. This code routes their VAPs to VLAN bridges; it does **not** create
-  the SSIDs themselves. Confirm your VAP indexes match the script defaults
-  (`IOT_IFACES` / `GUEST_IFACES` at the top of each `vlan-bridge-setup`);
-  [`docs/topology.md`](docs/topology.md) has a one-liner that prints every
-  configured VAP and its SSID name via `nvram get`.
+  the SSIDs themselves. Set `IOT_SSID` / `GUEST_SSID` at the top of each
+  `vlan-bridge-setup` to your SSID names — VAPs are discovered by SSID, so
+  indexes don't matter; [`docs/topology.md`](docs/topology.md) has a
+  one-liner that prints every configured VAP and its SSID name via
+  `nvram get`.
 - *(Untested)* If you use Asus's newer "Guest Network Pro" / "AiMesh Guest"
   feature, the scripts have not been validated against it. The classic
   per-band Guest SSID setup is what's tested.
@@ -194,7 +205,7 @@ cd asuswrt-merlin-aimesh-vlan
 
 # Step 0: take backups (see "Pre-install backup" above) — do not skip.
 
-# Edit IOT_VLAN / GUEST_VLAN / IOT_IFACES / GUEST_IFACES in:
+# Edit IOT_VLAN / GUEST_VLAN / IOT_SSID / GUEST_SSID in:
 #   main/jffs/scripts/vlan-bridge-setup
 #   secondary/jffs/scripts/vlan-bridge-setup
 
@@ -251,6 +262,38 @@ DHCP returns an IP from the LAN scope (VLAN 1) instead, the problem is
 switch isn't tagging VLAN 30/40, or your upstream router has no DHCP
 scope on those VLANs. Nothing more to fix on the AP side.
 
+## Monitoring & alerting (optional)
+
+The watcher is the thing standing between you and Guest/IoT clients
+quietly landing on your trusted LAN — so it's worth knowing (a) when it
+had to act, and (b) that it's still alive at all. The scripts emit three
+syslog markers for exactly this (plain `logger` lines — they cost nothing
+and need no extra software on the node):
+
+| Marker | When | Meaning |
+|--------|------|---------|
+| `vlan1_drift sev=crit vap=… from=… to=…` | a VAP (or backhaul sub-interface) was found outside its bridge mid-runtime | a real, seconds-long VLAN-1 leak occurred and was repaired — one-off after an AiMesh sync is normal, repeats deserve a look |
+| `vlan_watch_restart sev=warn reason=watcher-dead` | the guard cron relaunched a dead watcher | protection ran unwatched for up to 5 minutes |
+| `vlan_watch_hb hb=vlan-watch` | every 5 minutes per node | heartbeat — its **absence** means the watcher died, `/jffs` was wiped (an AiMesh node re-add does this), the AP is down, or syslog forwarding broke |
+
+Boot-time bridge moves are expected (Merlin rebuilds `br0` from NVRAM at
+every boot) and deliberately emit **no** marker, so reboots don't page you.
+
+To use them, forward the node's syslog to any collector (Merlin UI:
+System Log → Remote Log Server) and alert on two things:
+
+1. **Any `sev=(warn|crit)` line** — e.g. LogQL:
+   `{job="syslog"} |~ "sev=(warn|crit)"`
+2. **Heartbeat absence** — e.g. LogQL, alerting when fewer hosts report
+   than you have nodes (NoData-safe):
+   `count(sum by (host) (count_over_time({job="syslog"} |= "vlan_watch_hb" [15m]))) or vector(0)`
+
+The second one matters most: every other failure mode announces itself,
+but a dead watcher is silent — and it's the one an AiMesh node re-add
+(which wipes `/jffs`, scripts included) actually produces. Without an
+absence alert you'd rediscover that during your next security audit
+instead of within 15 minutes.
+
 ## Extras
 
 - **`tools/iot-isolate.sh`** — temporarily disable AP isolation and
@@ -264,11 +307,11 @@ scope on those VLANs. Nothing more to fix on the AP side.
 ## Tested on
 
 - ASUS ZenWiFi ET8 (2-node AiMesh, wireless backhaul) on Asuswrt-Merlin
-  gnuton fork 3004.388.10_2.
+  gnuton fork 3004.388.10_2 and 3004.388.11_1.
 
 It should work on any Asuswrt-Merlin AP with the standard `wlN.M`
 interface naming and `wds*.0.1` backhaul. If you try it on a different
-model, edit `IOT_IFACES` / `GUEST_IFACES` and the `TRUNK` value to match —
+model, edit `IOT_SSID` / `GUEST_SSID` and the `TRUNK` value to match —
 they're the only model-specific bits.
 
 ## Status / support

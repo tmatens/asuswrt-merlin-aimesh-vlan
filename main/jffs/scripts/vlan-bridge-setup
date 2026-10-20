@@ -40,6 +40,19 @@ TRUNK="eth0"
 BACKHAUL_IFACES="wds0.0.1 wds1.0.1 wds2.0.1"
 LOG="/tmp/vlan-bridge-setup.log"
 
+# Syslog markers: drift events + heartbeat go through logger(1) so
+# the remote-syslog collector can alert on VLAN-1 leaks and on watcher/AP
+# silence. Plain log() lines stay in the local /tmp file only.
+#   vlan1_drift sev=crit ...  -> a VAP/backhaul subif found outside its bridge
+#                                while the watcher runs (unexpected; alerts)
+#   vlan_watch_hb ...         -> emitted every HB_TICKS polls; the collector
+#                                alerts on ABSENCE (watcher dead / jffs wiped /
+#                                AP down / syslog path broken)
+# Boot-time moves are expected (br0 is rebuilt from nvram) and emit no marker.
+WATCH_MODE=0      # set to 1 inside the background watcher
+WATCH_INTERVAL=10 # watcher poll (s) — bounds how long an AiMesh re-sync drift can leak
+HB_TICKS=30       # heartbeat every HB_TICKS x WATCH_INTERVAL = 5 min
+
 # --- VLAN definitions --------------------------------------------------------
 # VAPs are discovered dynamically by SSID (see discover_vaps), so this adapts
 # automatically to bands being enabled/disabled and to per-node VAP indexing --
@@ -158,6 +171,8 @@ assign_ifaces() {
 
         if [ "$master" = "br0" ]; then
             log "Moving ${iface}: br0 -> ${br}"
+            [ "$WATCH_MODE" = "1" ] && logger -t vlan-watch \
+                "vlan1_drift sev=crit vap=${iface} from=br0 to=${br}"
             brctl delif br0 "$iface" 2>/dev/null
         elif [ "$master" = "$br" ]; then
             continue   # already in the correct bridge (quiet -- the watcher re-runs this)
@@ -205,6 +220,8 @@ setup_backhaul_vlan() {
         # In the wrong bridge — remove first, then re-add.
         if [ -n "$current_br" ]; then
             log "WARN: ${wds_vif} is in ${current_br}, expected ${br} — moving"
+            [ "$WATCH_MODE" = "1" ] && logger -t vlan-watch \
+                "vlan1_drift sev=crit vap=${wds_vif} from=${current_br} to=${br}"
             if ! brctl delif "$current_br" "$wds_vif" 2>&1; then
                 log "ERROR: failed to remove ${wds_vif} from ${current_br}"
                 continue
@@ -234,8 +251,16 @@ setup_backhaul_vlan() {
 WATCHER_PIDFILE="/tmp/vlan-bridge-watcher.pid"
 
 watch_backhaul() {
+    WATCH_MODE=1
+    local tick=0
+    logger -t vlan-watch "vlan_watch_hb hb=vlan-watch"
     while true; do
-        sleep 30
+        sleep "$WATCH_INTERVAL"
+        tick=$((tick + 1))
+        if [ "$tick" -ge "$HB_TICKS" ]; then
+            tick=0
+            logger -t vlan-watch "vlan_watch_hb hb=vlan-watch"
+        fi
         # Always run setup — it is a no-op when interfaces exist in the
         # correct bridge, but will repair interfaces that the kernel or
         # firmware moved to the wrong bridge (race on backhaul reconnect).
@@ -300,3 +325,9 @@ if [ -f "$WATCHER_PIDFILE" ] && kill -0 "$(cat $WATCHER_PIDFILE)" 2>/dev/null; t
 fi
 watch_backhaul &
 echo $! > "$WATCHER_PIDFILE"
+
+# Self-healing: ensure the guard cron exists — it relaunches this
+# script if the watcher dies. Registered here (not only in services-start) so
+# a manual run after a jffs restore also arms it. cru add is replace-by-id.
+[ -x /jffs/scripts/vlan-watch-guard ] && \
+    cru a vlan-watch-guard "*/5 * * * * /jffs/scripts/vlan-watch-guard"
