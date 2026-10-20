@@ -1,0 +1,72 @@
+#!/bin/sh
+# =============================================================================
+# bh-links — per-minute wireless-backhaul link sampler (forensics data, never
+# an alert).
+#
+# One `BH_LINKS` logfmt line per minute per node, so that when the bridging-
+# loop signal ("own address as source") rises, syslog already holds, minute by
+# minute: which uplink AiMesh calls active, which links are bridge members
+# (and their port state), how many frames each link carried, the RSSI the
+# satellite sees on each uplink, and how many OWNADDR frames ebtables logged.
+# A backhaul switchover, or a standby link that suddenly carries traffic,
+# shows up as a step in these columns in the same minute as the kernel lines.
+#
+# Root (re_mode=0) — the wds*.0.1 ports, one per backhaul radio:
+#   BH_LINKS role=root ownaddr=0 wds0.0.1_br=br0 wds0.0.1_st=3 wds0.0.1_rx=7 wds0.0.1_tx=180 …
+# Satellite (re_mode=1) — the radio STA interfaces; active = amas_ifname:
+#   BH_LINKS role=sat active=eth6 ownaddr=0 eth4_br=- eth4_st=- eth4_rx=143 eth4_tx=7 eth4_rssi=-41 …
+#
+# _rx/_tx are packet deltas since the previous sample (/proc/net/dev) — the
+# first line after boot reports 0. _br is the bridge the link belongs to ("-"
+# = not bridged), _st the bridge port state (3 = forwarding). ownaddr is the
+# number of OWNADDR ebtables hits since the previous sample; this script also
+# keeps those rules installed (see ownaddr-log; ebtables state is RAM-only).
+#
+# Scheduled by services-start:  cru a bh-links "* * * * * /jffs/scripts/bh-links"
+# Touch /jffs/configs/bh-links.off to silence it.
+# =============================================================================
+[ -e /jffs/configs/bh-links.off ] && exit 0
+STATE=/tmp/bh-links.prev
+
+[ -x /jffs/scripts/ownaddr-log ] && /jffs/scripts/ownaddr-log
+
+if [ "$(nvram get re_mode)" = "1" ]; then
+    role=sat
+    line="BH_LINKS role=sat active=$(nvram get amas_ifname)"
+    ifaces="$(nvram get wl0_ifname) $(nvram get wl1_ifname) $(nvram get wl2_ifname)"
+else
+    role=root
+    line="BH_LINKS role=root"
+    ifaces=$(ls /sys/class/net 2>/dev/null | grep -E '^wds[0-9]+\.[0-9]+\.[0-9]+$' | tr '\n' ' ')
+fi
+
+prev() { [ -r "$STATE" ] && awk -v k="$1" '$1 == k { print $2; exit }' "$STATE"; }
+delta() {  # delta <now> <prev>  (0 when no previous sample or counter reset)
+    if [ -n "$2" ] && [ "$1" -ge "$2" ] 2>/dev/null; then echo $(($1 - $2)); else echo 0; fi
+}
+
+own=$(ebtables -t nat -L PREROUTING --Lc 2>/dev/null \
+      | awk '/--log-prefix "OWNADDR"/ { for (i = 1; i <= NF; i++) if ($i == "pcnt") s += $(i + 2) } END { print s + 0 }')
+line="$line ownaddr=$(delta "$own" "$(prev ownaddr)")"
+now="ownaddr $own"
+
+for i in $ifaces; do
+    [ -n "$i" ] && [ -d "/sys/class/net/$i" ] || continue
+    set -- $(sed 's/:/ /' /proc/net/dev | awk -v i="$i" '$1 == i { print $3, $11 }')
+    rx=${1:-0}; tx=${2:-0}
+    drx=$(delta "$rx" "$(prev "${i}_rx")")
+    dtx=$(delta "$tx" "$(prev "${i}_tx")")
+    now="$now
+${i}_rx $rx
+${i}_tx $tx"
+    br=$(readlink "/sys/class/net/$i/brport/bridge" 2>/dev/null); br=${br##*/}
+    st=$(cat "/sys/class/net/$i/brport/state" 2>/dev/null)
+    line="$line ${i}_br=${br:--} ${i}_st=${st:--} ${i}_rx=$drx ${i}_tx=$dtx"
+    if [ "$role" = sat ]; then
+        rssi=$(wl -i "$i" rssi 2>/dev/null)
+        line="$line ${i}_rssi=${rssi:--}"
+    fi
+done
+
+printf '%s\n' "$now" > "$STATE"
+logger -t bh-links "$line"

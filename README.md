@@ -307,6 +307,11 @@ instead of within 15 minutes.
   with backhaul flaps. With AiMesh *Ethernet Backhaul Mode* on it watches
   the wired path instead (AiMesh nodes seen as LLDP neighbours over
   Ethernet), since the `wds` links no longer exist.
+- **`bh-links` + `ownaddr-log`** (both nodes) — per-minute backhaul link
+  sampler (bridge membership, per-link frame counts, uplink RSSI) and an
+  ebtables logger for the frames behind the kernel's "received packet with
+  own address as source address" warning. Forensics for wireless-backhaul
+  bridging loops; see `docs/operations.md`.
 
 ## Tested on
 

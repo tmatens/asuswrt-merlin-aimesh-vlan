@@ -1,0 +1,80 @@
+#!/bin/sh
+# =============================================================================
+# ownaddr-log — log the frames behind the kernel's
+#   "<bridge>: received packet on <port> with own address as source address"
+# warning (forensics data, never an alert).
+#
+# The kernel warns when a frame arrives on a bridge port whose SOURCE MAC is
+# one of that bridge's own local addresses (the bridge plus every member
+# port), but it never says which address, what the frame was, or where it
+# was going. This installs one ebtables logging rule per local address of
+# EVERY bridge (br0 and the VLAN bridges br30/br40 — the warning fires on
+# those too), matched exactly against the same set the kernel checks
+# (`brctl showmacs <bridge>`, "is local?" = yes), so each such frame is
+# logged with its in-interface, src/dst MAC, ethertype and IP/ARP header:
+#
+#   kernel: OWNADDR IN=eth5 OUT= MAC source = … MAC dest = … proto = 0x0806 …
+#
+# A prefix mask (any MAC in the node's block) is deliberately NOT used: it
+# also matches the Broadcom driver's own event frames (ethertype 0x886c from
+# a locally-administered 7e:… address), which the kernel check ignores.
+#
+# Rules are log-only (-j CONTINUE) and rate-limited (10/min, burst 20) so a
+# real flood cannot swamp syslog. Logged at warning level because Merlin's
+# default syslog level drops kernel info-level lines on some nodes.
+#
+# Idempotent reconcile: adds missing rules, deletes stale ones (the local
+# sets change after a wireless restart), never flushes the table. ebtables state
+# is RAM-only, so bh-links re-runs this every minute and services-start at
+# boot. Touch /jffs/configs/ownaddr-log.off to remove the rules and stop.
+# =============================================================================
+PREFIX=OWNADDR
+TABLE="-t nat"
+CHAIN=PREROUTING
+
+# ebtables prints MACs without leading zeros per octet; compare normalised.
+norm() {
+    printf '%s\n' "$1" | awk -F: '{
+        for (i = 1; i <= NF; i++) { sub(/^0+/, "", $i); if ($i == "") $i = "0" }
+        print tolower($1 ":" $2 ":" $3 ":" $4 ":" $5 ":" $6) }'
+}
+
+# current OWNADDR rules as "<rule-number> <source-mac>" lines
+current() {
+    ebtables $TABLE -L $CHAIN --Ln 2>/dev/null \
+        | awk -v p="$PREFIX" '$0 ~ "--log-prefix \"" p "\"" { n = $1; sub(/\.$/, "", n); print n, $3 }'
+}
+
+if [ -e /jffs/configs/ownaddr-log.off ]; then
+    want=""
+else
+    want=$(for b in /sys/class/net/*/bridge; do
+               [ -d "$b" ] || continue
+               b=${b%/bridge}; b=${b##*/}
+               brctl showmacs "$b" 2>/dev/null | awk 'NR > 1 && $3 == "yes" { print tolower($2) }'
+           done | sort -u)
+    [ -n "$want" ] || exit 0          # bridges not up yet — try again next minute
+fi
+
+cur=$(current)
+
+# Delete stale rules highest-number first so earlier numbers do not shift.
+printf '%s\n' "$cur" | sort -rn | while read -r n mac; do
+    [ -n "$n" ] || continue
+    keep=0
+    for w in $want; do [ "$(norm "$w")" = "$(norm "$mac")" ] && keep=1; done
+    [ "$keep" = 1 ] || ebtables $TABLE -D $CHAIN "$n"
+done
+
+# Add rules for local addresses not yet covered.
+for w in $want; do
+    have=0
+    nw=$(norm "$w")
+    for c in $(printf '%s\n' "$cur" | awk '{ print $2 }'); do
+        [ "$(norm "$c")" = "$nw" ] && have=1
+    done
+    [ "$have" = 1 ] && continue
+    ebtables $TABLE -A $CHAIN -s "$w" --limit 10/min --limit-burst 20 \
+        --log-level warning --log-prefix "$PREFIX" --log-ip --log-arp -j CONTINUE \
+        || logger -t ownaddr-log "ERROR: could not add OWNADDR rule for $w"
+done
