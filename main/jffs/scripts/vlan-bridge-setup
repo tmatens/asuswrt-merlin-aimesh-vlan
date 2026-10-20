@@ -41,14 +41,53 @@ BACKHAUL_IFACES="wds0.0.1 wds1.0.1 wds2.0.1"
 LOG="/tmp/vlan-bridge-setup.log"
 
 # --- VLAN definitions --------------------------------------------------------
-IOT_VLAN="40";   IOT_BRIDGE="br40";   IOT_IFACES="wl0.1 wl1.1 wl2.1"
-GUEST_VLAN="30"; GUEST_BRIDGE="br30"; GUEST_IFACES="wl0.2 wl1.2"
+# VAPs are discovered dynamically by SSID (see discover_vaps), so this adapts
+# automatically to bands being enabled/disabled and to per-node VAP indexing --
+# no hardcoded interface lists to keep in sync.
+IOT_VLAN="40";   IOT_BRIDGE="br40";   IOT_SSID="MyNet-IoT"
+GUEST_VLAN="30"; GUEST_BRIDGE="br30"; GUEST_SSID="MyNet-Guest"
 
 log() { echo "[$(date '+%H:%M:%S')] vlan-bridge: $*" | tee -a "$LOG"; }
 
 # Return the bridge an interface belongs to (empty string if none).
 get_master() {
     ip link show "$1" 2>/dev/null | grep -o 'master [^ ]*' | awk '{print $2}'
+}
+
+# ---------------------------------------------------------------------------
+# Discover the VAP interfaces currently serving a given SSID: enabled in NVRAM
+# AND present in the kernel. Dynamic by design -- robust to bands being
+# enabled/disabled and to per-node VAP-index differences (no hardcoded lists).
+# $1 = SSID to match. Echoes a space-separated interface list.
+# ---------------------------------------------------------------------------
+discover_vaps() {
+    local want="$1" r v iface out=""
+    for r in wl0 wl1 wl2; do
+        for v in 1 2 3 4; do
+            iface="${r}.${v}"
+            [ "$(nvram get ${iface}_ssid 2>/dev/null)" = "$want" ] || continue
+            [ "$(nvram get ${iface}_bss_enabled 2>/dev/null)" = "1" ] || continue
+            ip link show "$iface" >/dev/null 2>&1 || continue
+            out="$out $iface"
+        done
+    done
+    echo "${out# }"
+}
+
+# ---------------------------------------------------------------------------
+# Wait until at least one VAP for the given SSID exists.
+# $1 = SSID, $2 = max wait seconds.
+# ---------------------------------------------------------------------------
+wait_for_vaps() {
+    local want="$1" max="$2" waited=0
+    log "Waiting for a VAP serving SSID '$want'"
+    while [ "$waited" -lt "$max" ]; do
+        [ -n "$(discover_vaps "$want")" ] && return 0
+        sleep 3
+        waited=$((waited + 3))
+    done
+    log "ERROR: timed out after ${max}s -- no enabled VAP for SSID '$want'"
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -121,8 +160,7 @@ assign_ifaces() {
             log "Moving ${iface}: br0 -> ${br}"
             brctl delif br0 "$iface" 2>/dev/null
         elif [ "$master" = "$br" ]; then
-            log "${iface} already in ${br} -- skipping"
-            continue
+            continue   # already in the correct bridge (quiet -- the watcher re-runs this)
         fi
 
         brctl addif "$br" "$iface" 2>/dev/null
@@ -201,8 +239,15 @@ watch_backhaul() {
         # Always run setup — it is a no-op when interfaces exist in the
         # correct bridge, but will repair interfaces that the kernel or
         # firmware moved to the wrong bridge (race on backhaul reconnect).
-        local before
+        local before g
         before=$(brctl show br0 br30 br40 2>/dev/null)
+
+        # Re-discover & re-bridge fronthaul VAPs too: catches a band being
+        # re-enabled or an AiMesh re-sync dropping a VAP back into br0 outside
+        # of a restart_wireless. assign_ifaces is idempotent and quiet here.
+        assign_ifaces "$IOT_BRIDGE" "$IOT_VLAN" "$(discover_vaps "$IOT_SSID")"
+        g="$(discover_vaps "$GUEST_SSID")"
+        [ -n "$g" ] && assign_ifaces "$GUEST_BRIDGE" "$GUEST_VLAN" "$g"
 
         setup_backhaul_vlan "$IOT_BRIDGE" "$IOT_VLAN"
         setup_backhaul_vlan "$GUEST_BRIDGE" "$GUEST_VLAN"
@@ -226,17 +271,23 @@ log_bridge_state() {
 # ---------------------------------------------------------------------------
 log "=== start ==="
 
-# IoT (VLAN 40) -- required
-wait_for_ifaces "$IOT_IFACES" 90 || exit 1
+# IoT (VLAN 40) -- required. Discover IoT VAPs by SSID (any band / any index);
+# require at least one before proceeding so a transient empty result can't leave
+# IoT untagged. assign_ifaces bridges whichever VAPs currently exist.
+wait_for_vaps "$IOT_SSID" 90 || exit 1
+IOT_IFACES="$(discover_vaps "$IOT_SSID")"
+log "IoT VAPs (${IOT_SSID}): ${IOT_IFACES:-none}"
 setup_vlan_iface "$IOT_VLAN"
 setup_bridge "$IOT_BRIDGE"
 assign_ifaces "$IOT_BRIDGE" "$IOT_VLAN" "$IOT_IFACES"
 setup_backhaul_vlan "$IOT_BRIDGE" "$IOT_VLAN"
 
 # Guest (VLAN 30) -- bridge and trunk always created; VAPs assigned if present
+GUEST_IFACES="$(discover_vaps "$GUEST_SSID")"
+log "Guest VAPs (${GUEST_SSID}): ${GUEST_IFACES:-none}"
 setup_vlan_iface "$GUEST_VLAN"
 setup_bridge "$GUEST_BRIDGE"
-assign_ifaces "$GUEST_BRIDGE" "$GUEST_VLAN" "$GUEST_IFACES"
+[ -n "$GUEST_IFACES" ] && assign_ifaces "$GUEST_BRIDGE" "$GUEST_VLAN" "$GUEST_IFACES"
 setup_backhaul_vlan "$GUEST_BRIDGE" "$GUEST_VLAN"
 
 log_bridge_state

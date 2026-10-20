@@ -41,14 +41,53 @@ TRUNK="eth6"
 LOG="/tmp/vlan-bridge-setup.log"
 
 # --- VLAN definitions --------------------------------------------------------
-IOT_VLAN="40";   IOT_BRIDGE="br40";   IOT_IFACES="wl0.2 wl1.2 wl2.2"
-GUEST_VLAN="30"; GUEST_BRIDGE="br30"; GUEST_IFACES="wl0.3 wl1.3"
+# VAPs are discovered dynamically by SSID (see discover_vaps), so this adapts
+# automatically to bands being enabled/disabled and to per-node VAP indexing --
+# no hardcoded interface lists to keep in sync.
+IOT_VLAN="40";   IOT_BRIDGE="br40";   IOT_SSID="MyNet-IoT"
+GUEST_VLAN="30"; GUEST_BRIDGE="br30"; GUEST_SSID="MyNet-Guest"
 
 log() { echo "[$(date '+%H:%M:%S')] vlan-bridge: $*" | tee -a "$LOG"; }
 
 # Return the bridge an interface belongs to (empty string if none).
 get_master() {
     ip link show "$1" 2>/dev/null | grep -o 'master [^ ]*' | awk '{print $2}'
+}
+
+# ---------------------------------------------------------------------------
+# Discover the VAP interfaces currently serving a given SSID: enabled in NVRAM
+# AND present in the kernel. Dynamic by design -- robust to bands being
+# enabled/disabled and to per-node VAP-index differences (no hardcoded lists).
+# $1 = SSID to match. Echoes a space-separated interface list.
+# ---------------------------------------------------------------------------
+discover_vaps() {
+    local want="$1" r v iface out=""
+    for r in wl0 wl1 wl2; do
+        for v in 1 2 3 4; do
+            iface="${r}.${v}"
+            [ "$(nvram get ${iface}_ssid 2>/dev/null)" = "$want" ] || continue
+            [ "$(nvram get ${iface}_bss_enabled 2>/dev/null)" = "1" ] || continue
+            ip link show "$iface" >/dev/null 2>&1 || continue
+            out="$out $iface"
+        done
+    done
+    echo "${out# }"
+}
+
+# ---------------------------------------------------------------------------
+# Wait until at least one VAP for the given SSID exists.
+# $1 = SSID, $2 = max wait seconds.
+# ---------------------------------------------------------------------------
+wait_for_vaps() {
+    local want="$1" max="$2" waited=0
+    log "Waiting for a VAP serving SSID '$want'"
+    while [ "$waited" -lt "$max" ]; do
+        [ -n "$(discover_vaps "$want")" ] && return 0
+        sleep 5
+        waited=$((waited + 5))
+    done
+    log "ERROR: timed out after ${max}s -- no enabled VAP for SSID '$want'"
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -122,8 +161,7 @@ assign_ifaces() {
         current_br=$(get_master "$iface")
 
         if [ "$current_br" = "$br" ]; then
-            log "${iface} already in ${br} -- skipping"
-            continue
+            continue   # already in the correct bridge (quiet -- watcher re-runs this)
         fi
 
         if [ -n "$current_br" ]; then
@@ -181,16 +219,19 @@ HEARTBEAT_INTERVAL=3600
 
 watch_vaps() {
     local last_heartbeat=0
-    # iface:expected-bridge pairs
-    local pairs="wl0.2:${IOT_BRIDGE} wl1.2:${IOT_BRIDGE} wl2.2:${IOT_BRIDGE} wl0.3:${GUEST_BRIDGE} wl1.3:${GUEST_BRIDGE}"
 
     log "watcher: started (interval=${WATCH_INTERVAL}s, heartbeat=${HEARTBEAT_INTERVAL}s)"
     [ -f "$WATCHER_REPAIRS" ] || echo 0 > "$WATCHER_REPAIRS"
 
     while true; do
         sleep "$WATCH_INTERVAL"
-        local now drift=0
+        local now drift=0 pairs="" i
         now=$(date +%s)
+
+        # Build iface:expected-bridge pairs dynamically each pass, by SSID, so the
+        # watcher tracks whatever IoT/Guest VAPs currently exist (bands on/off, re-index).
+        for i in $(discover_vaps "$IOT_SSID");   do pairs="$pairs ${i}:${IOT_BRIDGE}"; done
+        for i in $(discover_vaps "$GUEST_SSID"); do pairs="$pairs ${i}:${GUEST_BRIDGE}"; done
 
         for pair in $pairs; do
             local iface="${pair%:*}" expected="${pair#*:}" current verify
@@ -249,11 +290,18 @@ setup_bridge "$IOT_BRIDGE" "$IOT_VLAN"
 setup_vlan_iface "$GUEST_VLAN"
 setup_bridge "$GUEST_BRIDGE" "$GUEST_VLAN"
 
-# Wait for IoT VAPs (required), then assign
-wait_for_ifaces "$IOT_IFACES" 180 && assign_ifaces "$IOT_BRIDGE" "$IOT_IFACES"
+# Discover IoT VAPs by SSID (any band / any index). AiMesh syncs VAPs minutes
+# after boot, so wait for at least one before assigning.
+if wait_for_vaps "$IOT_SSID" 180; then
+    IOT_IFACES="$(discover_vaps "$IOT_SSID")"
+    log "IoT VAPs (${IOT_SSID}): ${IOT_IFACES:-none}"
+    assign_ifaces "$IOT_BRIDGE" "$IOT_IFACES"
+fi
 
-# Wait for Guest VAPs (optional -- don't block IoT if these fail)
-wait_for_ifaces "$GUEST_IFACES" 180 && assign_ifaces "$GUEST_BRIDGE" "$GUEST_IFACES"
+# Guest VAPs (optional -- don't block IoT if absent)
+GUEST_IFACES="$(discover_vaps "$GUEST_SSID")"
+log "Guest VAPs (${GUEST_SSID}): ${GUEST_IFACES:-none}"
+[ -n "$GUEST_IFACES" ] && assign_ifaces "$GUEST_BRIDGE" "$GUEST_IFACES"
 
 log_bridge_state
 log "=== done ==="
