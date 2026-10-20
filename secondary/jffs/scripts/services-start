@@ -24,3 +24,20 @@ if [ -x "$SETUP" ]; then
 else
     logger -t services-start "ERROR: $SETUP not found or not executable"
 fi
+
+# Self-healing guard cron: relaunches vlan-bridge-setup if the
+# watcher dies. Also registered by vlan-bridge-setup itself (replace-by-id).
+GUARD="/jffs/scripts/vlan-watch-guard"
+[ -x "$GUARD" ] && cru a vlan-watch-guard "*/5 * * * * $GUARD"
+
+# Backhaul link sampler + own-address frame logger (bridging-loop forensics):
+# BH_LINKS data line per minute — bridge membership, per-link frame counts
+# (and uplink RSSI on the satellite) and the OWNADDR ebtables hit count — and
+# the OWNADDR rules that log the frames behind the kernel's "own address as
+# source" warning (ebtables state is RAM-only; bh-links keeps them installed).
+# Data, never an alert. /jffs/configs/bh-links.off silences the sampler;
+# /jffs/configs/ownaddr-log.off removes the rules.
+OWNADDR="/jffs/scripts/ownaddr-log"
+[ -x "$OWNADDR" ] && ( sleep 120; "$OWNADDR" ) &
+BHLINKS="/jffs/scripts/bh-links"
+[ -x "$BHLINKS" ] && cru a bh-links "* * * * * $BHLINKS"

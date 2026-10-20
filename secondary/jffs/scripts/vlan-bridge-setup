@@ -7,22 +7,33 @@
 #
 # What this does
 # --------------
-# Creates dedicated bridges for IoT and Guest traffic on a wireless-backhaul
-# satellite node:
+# Creates dedicated bridges for IoT and Guest traffic on a satellite node:
 #   br40 -- IoT clients    (VLAN 40)
 #   br30 -- Guest clients  (VLAN 30)
 #
-# Tagged frames travel over the wireless backhaul trunk (eth6) to the root
-# node, which forwards them on the wired uplink to the managed switch and
-# upstream router.
+# Tagged frames travel over whichever interface AiMesh is currently using as
+# the backhaul -- the "trunk". On a wireless backhaul that is the uplink radio
+# (eth6 here) and the root node forwards the tags to the managed switch; on a
+# wired backhaul (Ethernet, MoCA) it is the WAN port (eth0) and the switch port
+# it lands on must carry the VLANs tagged.
 #
-# Bridge layout produced (defaults — edit IOT_*/GUEST_* below to change):
+# Bridge layout produced (defaults — edit IOT_*/GUEST_* below to change),
+# <trunk> being the active backhaul interface:
 #
-#   Main SSID    (wl0.1 / wl1.1        ) -> br0  -> eth6      (untagged, VLAN 1)
-#   Main-IoT     (wl0.2 / wl1.2 / wl2.2) -> br40 -> eth6.40   (VLAN 40 tagged)
-#   Main-Guest   (wl0.3 / wl1.3        ) -> br30 -> eth6.30   (VLAN 30 tagged)
+#   Main SSID    (wl0.1 / wl1.1        ) -> br0  -> <trunk>     (untagged, VLAN 1)
+#   Main-IoT     (wl0.2 / wl1.2 / wl2.2) -> br40 -> <trunk>.40  (VLAN 40 tagged)
+#   Main-Guest   (wl0.3 / wl1.3        ) -> br30 -> <trunk>.30  (VLAN 30 tagged)
 #   Backhaul SSID (wl2.1)                -> br0  -- managed by AiMesh, do not touch
 #   AiMesh internal (wl2.6)              -> br0  -- internal, do not touch
+#
+# Trunk note
+# ----------
+# The trunk is not fixed: AiMesh moves the backhaul between the wire and the
+# radios on its own (cable plugged/unplugged, "Auto" priority falling back to
+# wireless), and records the active interface in nvram `amas_ifname`. The
+# script reads it at start, and the watcher re-homes br40/br30 onto the new
+# trunk when it changes -- otherwise Guest/IoT would stay pinned to a dead
+# uplink while the main SSID carries on working.
 #
 # Timing note
 # -----------
@@ -37,18 +48,62 @@
 # /tmp/vlan-bridge-watcher.repairs so you can see how often this happens.
 # =============================================================================
 
-TRUNK="eth6"
+# Used only when nvram `amas_ifname` stays empty (or names a missing interface)
+# for the whole startup wait (see wait_for_trunk). TRUNK itself is set in Main and updated by the watcher.
+DEFAULT_TRUNK="eth6"
+# The node's wired backhaul port (WAN port). Only used to grade the syslog
+# marker when the backhaul moves -- see the watcher.
+WIRED_TRUNK="eth0"
 LOG="/tmp/vlan-bridge-setup.log"
 
 # --- VLAN definitions --------------------------------------------------------
-IOT_VLAN="40";   IOT_BRIDGE="br40";   IOT_IFACES="wl0.2 wl1.2 wl2.2"
-GUEST_VLAN="30"; GUEST_BRIDGE="br30"; GUEST_IFACES="wl0.3 wl1.3"
+# VAPs are discovered dynamically by SSID (see discover_vaps), so this adapts
+# automatically to bands being enabled/disabled and to per-node VAP indexing --
+# no hardcoded interface lists to keep in sync.
+IOT_VLAN="40";   IOT_BRIDGE="br40";   IOT_SSID="MyNet-IoT"
+GUEST_VLAN="30"; GUEST_BRIDGE="br30"; GUEST_SSID="MyNet-Guest"
 
 log() { echo "[$(date '+%H:%M:%S')] vlan-bridge: $*" | tee -a "$LOG"; }
 
 # Return the bridge an interface belongs to (empty string if none).
 get_master() {
     ip link show "$1" 2>/dev/null | grep -o 'master [^ ]*' | awk '{print $2}'
+}
+
+# ---------------------------------------------------------------------------
+# Discover the VAP interfaces currently serving a given SSID: enabled in NVRAM
+# AND present in the kernel. Dynamic by design -- robust to bands being
+# enabled/disabled and to per-node VAP-index differences (no hardcoded lists).
+# $1 = SSID to match. Echoes a space-separated interface list.
+# ---------------------------------------------------------------------------
+discover_vaps() {
+    local want="$1" r v iface out=""
+    for r in wl0 wl1 wl2; do
+        for v in 1 2 3 4; do
+            iface="${r}.${v}"
+            [ "$(nvram get ${iface}_ssid 2>/dev/null)" = "$want" ] || continue
+            [ "$(nvram get ${iface}_bss_enabled 2>/dev/null)" = "1" ] || continue
+            ip link show "$iface" >/dev/null 2>&1 || continue
+            out="$out $iface"
+        done
+    done
+    echo "${out# }"
+}
+
+# ---------------------------------------------------------------------------
+# Wait until at least one VAP for the given SSID exists.
+# $1 = SSID, $2 = max wait seconds.
+# ---------------------------------------------------------------------------
+wait_for_vaps() {
+    local want="$1" max="$2" waited=0
+    log "Waiting for a VAP serving SSID '$want'"
+    while [ "$waited" -lt "$max" ]; do
+        [ -n "$(discover_vaps "$want")" ] && return 0
+        sleep 5
+        waited=$((waited + 5))
+    done
+    log "ERROR: timed out after ${max}s -- no enabled VAP for SSID '$want'"
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -69,6 +124,54 @@ wait_for_ifaces() {
     done
     log "ERROR: Timed out after ${max}s waiting for: $ifaces"
     return 1
+}
+
+# ---------------------------------------------------------------------------
+# Echo the interface AiMesh is using as the backhaul right now, or nothing
+# when it cannot be told. nvram `amas_ifname` goes EMPTY for 15-30 s whenever
+# AiMesh re-evaluates the backhaul (wireless restart, priority change), so
+# "unknown" must never be read as "the default radio": that parks Guest/IoT on
+# a dead trunk and reports a fallback that did not happen.
+# ---------------------------------------------------------------------------
+detect_trunk() {
+    local t
+    t=$(nvram get amas_ifname 2>/dev/null)
+    [ -n "$t" ] && ip link show "$t" >/dev/null 2>&1 && echo "$t"
+}
+
+# ---------------------------------------------------------------------------
+# Startup: wait for AiMesh to name its backhaul, then fall back to the default.
+# $1 = max wait seconds
+# ---------------------------------------------------------------------------
+wait_for_trunk() {
+    local max="$1" waited=0 t
+    while [ "$waited" -lt "$max" ]; do
+        t=$(detect_trunk)
+        [ -n "$t" ] && { echo "$t"; return 0; }
+        sleep 5
+        waited=$((waited + 5))
+    done
+    echo "$DEFAULT_TRUNK"
+}
+
+# ---------------------------------------------------------------------------
+# Drop VLAN sub-interfaces left on a previous trunk. Must run BEFORE the new
+# one is added: two trunks in one bridge join the wire and the radio uplink
+# into a loop, and these bridges run with STP off.
+# $1 = bridge name, $2 = VLAN id
+# ---------------------------------------------------------------------------
+remove_stale_trunks() {
+    local br="$1" vlan="$2" m
+    for m in $(ls "/sys/class/net/${br}/brif" 2>/dev/null); do
+        case "$m" in
+            "${TRUNK}.${vlan}") ;;
+            eth*."${vlan}")
+                log "Removing stale trunk ${m} from ${br} (trunk is now ${TRUNK})"
+                brctl delif "$br" "$m" 2>&1
+                ip link del "$m" 2>&1
+                ;;
+        esac
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -98,6 +201,8 @@ setup_bridge() {
     fi
     ip link set "$br" up
 
+    remove_stale_trunks "$br" "$vlan"
+
     local viface="${TRUNK}.${vlan}"
     if ! brctl show "$br" 2>/dev/null | grep -q "${viface}"; then
         log "Adding ${viface} to ${br}"
@@ -122,8 +227,7 @@ assign_ifaces() {
         current_br=$(get_master "$iface")
 
         if [ "$current_br" = "$br" ]; then
-            log "${iface} already in ${br} -- skipping"
-            continue
+            continue   # already in the correct bridge (quiet -- watcher re-runs this)
         fi
 
         if [ -n "$current_br" ]; then
@@ -176,21 +280,62 @@ log_bridge_state() {
 # ---------------------------------------------------------------------------
 WATCHER_PIDFILE="/tmp/vlan-bridge-watcher.pid"
 WATCHER_REPAIRS="/tmp/vlan-bridge-watcher.repairs"
-WATCH_INTERVAL=30
+WATCH_INTERVAL=10
 HEARTBEAT_INTERVAL=3600
+# Syslog markers, separate from the local-log heartbeat above:
+#   vlan1_drift sev=crit ...  -> drift detected (unexpected; collector alerts)
+#   vlan_trunk_change ...     -> backhaul moved and the VLAN trunks followed;
+#                                carries sev=warn only when it LEFT the wired port
+#   vlan_watch_hb ...         -> every SYSLOG_HB_INTERVAL; the collector alerts
+#                                on ABSENCE (watcher dead / jffs wiped / AP
+#                                down / syslog path broken)
+SYSLOG_HB_INTERVAL=300
 
 watch_vaps() {
-    local last_heartbeat=0
-    # iface:expected-bridge pairs
-    local pairs="wl0.2:${IOT_BRIDGE} wl1.2:${IOT_BRIDGE} wl2.2:${IOT_BRIDGE} wl0.3:${GUEST_BRIDGE} wl1.3:${GUEST_BRIDGE}"
+    local last_heartbeat=0 last_syslog_hb
+    last_syslog_hb=$(date +%s)
 
     log "watcher: started (interval=${WATCH_INTERVAL}s, heartbeat=${HEARTBEAT_INTERVAL}s)"
+    logger -t vlan-watch "vlan_watch_hb hb=vlan-watch"
     [ -f "$WATCHER_REPAIRS" ] || echo 0 > "$WATCHER_REPAIRS"
+
+    local trunk_now trunk_pending=""
 
     while true; do
         sleep "$WATCH_INTERVAL"
-        local now drift=0
+        local now drift=0 pairs="" i
         now=$(date +%s)
+
+        # Follow the backhaul. A new trunk must be seen on two consecutive
+        # passes before acting, so a backhaul that is still flapping between
+        # candidates does not drag the bridges along with every bounce.
+        trunk_now=$(detect_trunk)
+        if [ -z "$trunk_now" ] || [ "$trunk_now" = "$TRUNK" ]; then
+            trunk_pending=""
+        elif [ "$trunk_now" != "$trunk_pending" ]; then
+            trunk_pending="$trunk_now"
+        else
+            log "watcher: backhaul moved ${TRUNK} -> ${trunk_now}, re-homing VLAN trunks"
+            # Leaving the wired port is a degradation someone should hear about
+            # (dead cable/coax, unplugged adapter): mark it sev=warn so the
+            # collector alerts. Moves back to the wire, or between radios, are
+            # logged without a severity.
+            if [ "$TRUNK" = "$WIRED_TRUNK" ]; then
+                logger -t vlan-watch "vlan_trunk_change sev=warn iface=${trunk_now} from=${TRUNK}"
+            else
+                logger -t vlan-watch "vlan_trunk_change iface=${trunk_now} from=${TRUNK}"
+            fi
+            TRUNK="$trunk_now"
+            trunk_pending=""
+            setup_vlan_iface "$IOT_VLAN";   setup_bridge "$IOT_BRIDGE" "$IOT_VLAN"
+            setup_vlan_iface "$GUEST_VLAN"; setup_bridge "$GUEST_BRIDGE" "$GUEST_VLAN"
+            log_bridge_state
+        fi
+
+        # Build iface:expected-bridge pairs dynamically each pass, by SSID, so the
+        # watcher tracks whatever IoT/Guest VAPs currently exist (bands on/off, re-index).
+        for i in $(discover_vaps "$IOT_SSID");   do pairs="$pairs ${i}:${IOT_BRIDGE}"; done
+        for i in $(discover_vaps "$GUEST_SSID"); do pairs="$pairs ${i}:${GUEST_BRIDGE}"; done
 
         for pair in $pairs; do
             local iface="${pair%:*}" expected="${pair#*:}" current verify
@@ -202,6 +347,8 @@ watch_vaps() {
 
             drift=$((drift + 1))
             log "watcher: drift — ${iface} is in ${current:-none}, expected ${expected}"
+            logger -t vlan-watch \
+                "vlan1_drift sev=crit vap=${iface} from=${current:-none} to=${expected}"
 
             if [ -n "$current" ]; then
                 if ! brctl delif "$current" "$iface" 2>&1; then
@@ -235,6 +382,11 @@ watch_vaps() {
             log "watcher: heartbeat — all VAPs healthy (repairs since boot: ${total:-0})"
             last_heartbeat=$now
         fi
+
+        if [ $((now - last_syslog_hb)) -ge "$SYSLOG_HB_INTERVAL" ]; then
+            logger -t vlan-watch "vlan_watch_hb hb=vlan-watch"
+            last_syslog_hb=$now
+        fi
     done
 }
 
@@ -243,17 +395,27 @@ watch_vaps() {
 # ---------------------------------------------------------------------------
 log "=== start ==="
 
+TRUNK=$(wait_for_trunk 60)
+log "Trunk (active backhaul): ${TRUNK}"
+
 # Create bridges and VLAN trunks immediately (no interfaces needed yet)
 setup_vlan_iface "$IOT_VLAN"
 setup_bridge "$IOT_BRIDGE" "$IOT_VLAN"
 setup_vlan_iface "$GUEST_VLAN"
 setup_bridge "$GUEST_BRIDGE" "$GUEST_VLAN"
 
-# Wait for IoT VAPs (required), then assign
-wait_for_ifaces "$IOT_IFACES" 180 && assign_ifaces "$IOT_BRIDGE" "$IOT_IFACES"
+# Discover IoT VAPs by SSID (any band / any index). AiMesh syncs VAPs minutes
+# after boot, so wait for at least one before assigning.
+if wait_for_vaps "$IOT_SSID" 180; then
+    IOT_IFACES="$(discover_vaps "$IOT_SSID")"
+    log "IoT VAPs (${IOT_SSID}): ${IOT_IFACES:-none}"
+    assign_ifaces "$IOT_BRIDGE" "$IOT_IFACES"
+fi
 
-# Wait for Guest VAPs (optional -- don't block IoT if these fail)
-wait_for_ifaces "$GUEST_IFACES" 180 && assign_ifaces "$GUEST_BRIDGE" "$GUEST_IFACES"
+# Guest VAPs (optional -- don't block IoT if absent)
+GUEST_IFACES="$(discover_vaps "$GUEST_SSID")"
+log "Guest VAPs (${GUEST_SSID}): ${GUEST_IFACES:-none}"
+[ -n "$GUEST_IFACES" ] && assign_ifaces "$GUEST_BRIDGE" "$GUEST_IFACES"
 
 log_bridge_state
 log "=== done ==="
@@ -265,3 +427,9 @@ if [ -f "$WATCHER_PIDFILE" ] && kill -0 "$(cat $WATCHER_PIDFILE)" 2>/dev/null; t
 fi
 watch_vaps &
 echo $! > "$WATCHER_PIDFILE"
+
+# Self-healing: ensure the guard cron exists — it relaunches this
+# script if the watcher dies. Registered here (not only in services-start) so
+# a manual run after a jffs restore also arms it. cru add is replace-by-id.
+[ -x /jffs/scripts/vlan-watch-guard ] && \
+    cru a vlan-watch-guard "*/5 * * * * /jffs/scripts/vlan-watch-guard"

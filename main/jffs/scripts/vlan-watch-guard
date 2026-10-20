@@ -1,0 +1,22 @@
+#!/bin/sh
+# =============================================================================
+# vlan-watch-guard — self-healing for the vlan-bridge watcher
+#
+# Location on router : /jffs/scripts/vlan-watch-guard
+# Called by          : cru cron every 5 min (registered by services-start and
+#                      by vlan-bridge-setup itself, replace-by-id)
+#
+# If the background watcher (sole runtime mitigation for the br0_ifnames
+# VLAN-1 leak) has died, relaunch vlan-bridge-setup — it is idempotent and
+# swaps a fresh watcher in. Announces the restart with a sev=warn syslog
+# marker for a log collector to alert on. A heartbeat-absence alert in that
+# collector remains the backstop for when THIS is gone too (jffs wipe).
+# =============================================================================
+
+PIDFILE="/tmp/vlan-bridge-watcher.pid"
+
+PID=$(cat "$PIDFILE" 2>/dev/null)
+[ -n "$PID" ] && kill -0 "$PID" 2>/dev/null && exit 0
+
+logger -t vlan-watch "vlan_watch_restart sev=warn reason=watcher-dead"
+/jffs/scripts/vlan-bridge-setup >/tmp/vlan-bridge-guard-run.log 2>&1

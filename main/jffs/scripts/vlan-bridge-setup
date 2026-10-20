@@ -40,15 +40,67 @@ TRUNK="eth0"
 BACKHAUL_IFACES="wds0.0.1 wds1.0.1 wds2.0.1"
 LOG="/tmp/vlan-bridge-setup.log"
 
+# Syslog markers: drift events + heartbeat go through logger(1) so
+# the remote-syslog collector can alert on VLAN-1 leaks and on watcher/AP
+# silence. Plain log() lines stay in the local /tmp file only.
+#   vlan1_drift sev=crit ...  -> a VAP/backhaul subif found outside its bridge
+#                                while the watcher runs (unexpected; alerts)
+#   vlan_watch_hb ...         -> emitted every HB_TICKS polls; the collector
+#                                alerts on ABSENCE (watcher dead / jffs wiped /
+#                                AP down / syslog path broken)
+# Boot-time moves are expected (br0 is rebuilt from nvram) and emit no marker.
+WATCH_MODE=0      # set to 1 inside the background watcher
+WATCH_INTERVAL=10 # watcher poll (s) — bounds how long an AiMesh re-sync drift can leak
+HB_TICKS=30       # heartbeat every HB_TICKS x WATCH_INTERVAL = 5 min
+
 # --- VLAN definitions --------------------------------------------------------
-IOT_VLAN="40";   IOT_BRIDGE="br40";   IOT_IFACES="wl0.1 wl1.1 wl2.1"
-GUEST_VLAN="30"; GUEST_BRIDGE="br30"; GUEST_IFACES="wl0.2 wl1.2"
+# VAPs are discovered dynamically by SSID (see discover_vaps), so this adapts
+# automatically to bands being enabled/disabled and to per-node VAP indexing --
+# no hardcoded interface lists to keep in sync.
+IOT_VLAN="40";   IOT_BRIDGE="br40";   IOT_SSID="MyNet-IoT"
+GUEST_VLAN="30"; GUEST_BRIDGE="br30"; GUEST_SSID="MyNet-Guest"
 
 log() { echo "[$(date '+%H:%M:%S')] vlan-bridge: $*" | tee -a "$LOG"; }
 
 # Return the bridge an interface belongs to (empty string if none).
 get_master() {
     ip link show "$1" 2>/dev/null | grep -o 'master [^ ]*' | awk '{print $2}'
+}
+
+# ---------------------------------------------------------------------------
+# Discover the VAP interfaces currently serving a given SSID: enabled in NVRAM
+# AND present in the kernel. Dynamic by design -- robust to bands being
+# enabled/disabled and to per-node VAP-index differences (no hardcoded lists).
+# $1 = SSID to match. Echoes a space-separated interface list.
+# ---------------------------------------------------------------------------
+discover_vaps() {
+    local want="$1" r v iface out=""
+    for r in wl0 wl1 wl2; do
+        for v in 1 2 3 4; do
+            iface="${r}.${v}"
+            [ "$(nvram get ${iface}_ssid 2>/dev/null)" = "$want" ] || continue
+            [ "$(nvram get ${iface}_bss_enabled 2>/dev/null)" = "1" ] || continue
+            ip link show "$iface" >/dev/null 2>&1 || continue
+            out="$out $iface"
+        done
+    done
+    echo "${out# }"
+}
+
+# ---------------------------------------------------------------------------
+# Wait until at least one VAP for the given SSID exists.
+# $1 = SSID, $2 = max wait seconds.
+# ---------------------------------------------------------------------------
+wait_for_vaps() {
+    local want="$1" max="$2" waited=0
+    log "Waiting for a VAP serving SSID '$want'"
+    while [ "$waited" -lt "$max" ]; do
+        [ -n "$(discover_vaps "$want")" ] && return 0
+        sleep 3
+        waited=$((waited + 3))
+    done
+    log "ERROR: timed out after ${max}s -- no enabled VAP for SSID '$want'"
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -119,10 +171,11 @@ assign_ifaces() {
 
         if [ "$master" = "br0" ]; then
             log "Moving ${iface}: br0 -> ${br}"
+            [ "$WATCH_MODE" = "1" ] && logger -t vlan-watch \
+                "vlan1_drift sev=crit vap=${iface} from=br0 to=${br}"
             brctl delif br0 "$iface" 2>/dev/null
         elif [ "$master" = "$br" ]; then
-            log "${iface} already in ${br} -- skipping"
-            continue
+            continue   # already in the correct bridge (quiet -- the watcher re-runs this)
         fi
 
         brctl addif "$br" "$iface" 2>/dev/null
@@ -167,6 +220,8 @@ setup_backhaul_vlan() {
         # In the wrong bridge — remove first, then re-add.
         if [ -n "$current_br" ]; then
             log "WARN: ${wds_vif} is in ${current_br}, expected ${br} — moving"
+            [ "$WATCH_MODE" = "1" ] && logger -t vlan-watch \
+                "vlan1_drift sev=crit vap=${wds_vif} from=${current_br} to=${br}"
             if ! brctl delif "$current_br" "$wds_vif" 2>&1; then
                 log "ERROR: failed to remove ${wds_vif} from ${current_br}"
                 continue
@@ -196,13 +251,28 @@ setup_backhaul_vlan() {
 WATCHER_PIDFILE="/tmp/vlan-bridge-watcher.pid"
 
 watch_backhaul() {
+    WATCH_MODE=1
+    local tick=0
+    logger -t vlan-watch "vlan_watch_hb hb=vlan-watch"
     while true; do
-        sleep 30
+        sleep "$WATCH_INTERVAL"
+        tick=$((tick + 1))
+        if [ "$tick" -ge "$HB_TICKS" ]; then
+            tick=0
+            logger -t vlan-watch "vlan_watch_hb hb=vlan-watch"
+        fi
         # Always run setup — it is a no-op when interfaces exist in the
         # correct bridge, but will repair interfaces that the kernel or
         # firmware moved to the wrong bridge (race on backhaul reconnect).
-        local before
+        local before g
         before=$(brctl show br0 br30 br40 2>/dev/null)
+
+        # Re-discover & re-bridge fronthaul VAPs too: catches a band being
+        # re-enabled or an AiMesh re-sync dropping a VAP back into br0 outside
+        # of a restart_wireless. assign_ifaces is idempotent and quiet here.
+        assign_ifaces "$IOT_BRIDGE" "$IOT_VLAN" "$(discover_vaps "$IOT_SSID")"
+        g="$(discover_vaps "$GUEST_SSID")"
+        [ -n "$g" ] && assign_ifaces "$GUEST_BRIDGE" "$GUEST_VLAN" "$g"
 
         setup_backhaul_vlan "$IOT_BRIDGE" "$IOT_VLAN"
         setup_backhaul_vlan "$GUEST_BRIDGE" "$GUEST_VLAN"
@@ -226,17 +296,23 @@ log_bridge_state() {
 # ---------------------------------------------------------------------------
 log "=== start ==="
 
-# IoT (VLAN 40) -- required
-wait_for_ifaces "$IOT_IFACES" 90 || exit 1
+# IoT (VLAN 40) -- required. Discover IoT VAPs by SSID (any band / any index);
+# require at least one before proceeding so a transient empty result can't leave
+# IoT untagged. assign_ifaces bridges whichever VAPs currently exist.
+wait_for_vaps "$IOT_SSID" 90 || exit 1
+IOT_IFACES="$(discover_vaps "$IOT_SSID")"
+log "IoT VAPs (${IOT_SSID}): ${IOT_IFACES:-none}"
 setup_vlan_iface "$IOT_VLAN"
 setup_bridge "$IOT_BRIDGE"
 assign_ifaces "$IOT_BRIDGE" "$IOT_VLAN" "$IOT_IFACES"
 setup_backhaul_vlan "$IOT_BRIDGE" "$IOT_VLAN"
 
 # Guest (VLAN 30) -- bridge and trunk always created; VAPs assigned if present
+GUEST_IFACES="$(discover_vaps "$GUEST_SSID")"
+log "Guest VAPs (${GUEST_SSID}): ${GUEST_IFACES:-none}"
 setup_vlan_iface "$GUEST_VLAN"
 setup_bridge "$GUEST_BRIDGE"
-assign_ifaces "$GUEST_BRIDGE" "$GUEST_VLAN" "$GUEST_IFACES"
+[ -n "$GUEST_IFACES" ] && assign_ifaces "$GUEST_BRIDGE" "$GUEST_VLAN" "$GUEST_IFACES"
 setup_backhaul_vlan "$GUEST_BRIDGE" "$GUEST_VLAN"
 
 log_bridge_state
@@ -249,3 +325,9 @@ if [ -f "$WATCHER_PIDFILE" ] && kill -0 "$(cat $WATCHER_PIDFILE)" 2>/dev/null; t
 fi
 watch_backhaul &
 echo $! > "$WATCHER_PIDFILE"
+
+# Self-healing: ensure the guard cron exists — it relaunches this
+# script if the watcher dies. Registered here (not only in services-start) so
+# a manual run after a jffs restore also arms it. cru add is replace-by-id.
+[ -x /jffs/scripts/vlan-watch-guard ] && \
+    cru a vlan-watch-guard "*/5 * * * * /jffs/scripts/vlan-watch-guard"

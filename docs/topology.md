@@ -41,6 +41,17 @@ These are the values baked into the scripts. Edit the scripts (search for
 | 30   | Guest   | br30   | eth0.30                | eth6.30                     |
 | 40   | IoT     | br40   | eth0.40                | eth6.40                     |
 
+The satellite column shows a wireless backhaul. On a wired backhaul (Ethernet
+or MoCA into the satellite's WAN port) the trunk is `eth0` instead. The
+satellite script follows the active backhaul (nvram `amas_ifname`) by itself.
+
+**A wired satellite must land on a VLAN-aware switch port that carries 30 and
+40 tagged** (like the root's uplink port). Do **not** cable it into one of the
+root node's LAN ports: the root only bridges Guest/IoT to its own uplink
+(`eth0.30` / `eth0.40`), and nothing on the LAN ports is set up to carry those
+tags. The main SSID keeps working on that satellite while Guest and IoT
+silently fail.
+
 ## Default SSID → bridge map
 
 ### Root node
@@ -64,8 +75,9 @@ These are the values baked into the scripts. Edit the scripts (search for
 **Note the index shift.** On the root, `wl0` is the primary SSID. On a
 satellite, AiMesh uses `wl0` for the backhaul probe and `wl0.1` for the
 primary SSID, pushing IoT to `wl0.2` and Guest to `wl0.3`. The scripts
-hardcode this difference. If your AiMesh assigns indexes differently, edit
-`IOT_IFACES` / `GUEST_IFACES` near the top of each `vlan-bridge-setup`.
+handle this automatically: VAPs are discovered **by SSID name**
+(`IOT_SSID` / `GUEST_SSID` near the top of each `vlan-bridge-setup`), so
+the index shift never needs configuring.
 
 ## Verifying VAP-to-SSID mapping on your nodes
 
@@ -78,5 +90,5 @@ for iface in wl0 wl0.1 wl0.2 wl0.3 wl1 wl1.1 wl1.2 wl1.3 wl2 wl2.1 wl2.2 wl2.3; 
 done
 ```
 
-That list is what the scripts assume. Adjust the `IOT_IFACES` /
-`GUEST_IFACES` constants in `vlan-bridge-setup` to match.
+Set the `IOT_SSID` / `GUEST_SSID` constants in `vlan-bridge-setup` to the
+SSID names shown — the scripts discover the matching VAPs at runtime.
