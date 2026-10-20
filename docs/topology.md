@@ -42,9 +42,15 @@ These are the values baked into the scripts. Edit the scripts (search for
 | 40   | IoT     | br40   | eth0.40                | eth6.40                     |
 
 The satellite column shows a wireless backhaul. On a wired backhaul (Ethernet
-or MoCA into the satellite's WAN port) the trunk is `eth0` instead, and the
-switch port it lands on must carry the VLANs tagged. The satellite script
-follows the active backhaul (nvram `amas_ifname`) by itself.
+or MoCA into the satellite's WAN port) the trunk is `eth0` instead. The
+satellite script follows the active backhaul (nvram `amas_ifname`) by itself.
+
+**A wired satellite must land on a VLAN-aware switch port that carries 30 and
+40 tagged** (like the root's uplink port). Do **not** cable it into one of the
+root node's LAN ports: the root only bridges Guest/IoT to its own uplink
+(`eth0.30` / `eth0.40`), and nothing on the LAN ports is set up to carry those
+tags. The main SSID keeps working on that satellite while Guest and IoT
+silently fail.
 
 ## Default SSID → bridge map
 

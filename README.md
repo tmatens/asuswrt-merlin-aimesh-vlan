@@ -317,6 +317,12 @@ instead of within 15 minutes.
 
 - ASUS ZenWiFi ET8 (2-node AiMesh, wireless backhaul) on Asuswrt-Merlin
   gnuton fork 3004.388.10_2 and 3004.388.11_1.
+- The same pair on a wired (MoCA) backhaul, with and without AiMesh
+  *Ethernet Backhaul Mode*, on 3004.388.11_1 only. Wired support relies on
+  nvram `amas_ifname`, `amas_eap_bhmode` and `cfg_device_list` and on
+  `lldpcli`, as found on that firmware; other models or firmware may differ.
+  A wired satellite needs a switch port trunking the Guest/IoT VLANs, not a
+  root LAN port — see [`docs/topology.md`](docs/topology.md).
 
 It should work on any Asuswrt-Merlin AP with the standard `wlN.M`
 interface naming and `wds*.0.1` backhaul. If you try it on a different

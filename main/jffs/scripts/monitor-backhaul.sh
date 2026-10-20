@@ -79,9 +79,17 @@ while true; do
         logger -t backhaul-monitor "backhaul mode: ${prev_mode:-unknown} -> $mode"
         prev_mode="$mode"
         wired_missing=0
+        # Wired mode judges the backhaul by LLDP. Without lldpcli the state is
+        # unknown, not down: say so once instead of reporting a false outage.
+        if [ "$mode" = "wired" ] && ! command -v lldpcli >/dev/null 2>&1; then
+            echo "$timestamp — wired mode: lldpcli not found, backhaul state not monitored" >> "$LOGFILE"
+            logger -t backhaul-monitor "wired mode: lldpcli not found, backhaul state not monitored"
+        fi
     fi
 
-    if [ "$mode" = "wired" ]; then
+    if [ "$mode" = "wired" ] && ! command -v lldpcli >/dev/null 2>&1; then
+        all_down=false
+    elif [ "$mode" = "wired" ]; then
         if [ "$(wired_nodes_seen)" -gt 0 ]; then
             wired_missing=0
             all_down=false
