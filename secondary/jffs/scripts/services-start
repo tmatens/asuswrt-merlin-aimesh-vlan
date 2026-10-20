@@ -41,3 +41,8 @@ OWNADDR="/jffs/scripts/ownaddr-log"
 [ -x "$OWNADDR" ] && ( sleep 120; "$OWNADDR" ) &
 BHLINKS="/jffs/scripts/bh-links"
 [ -x "$BHLINKS" ] && cru a bh-links "* * * * * $BHLINKS"
+
+# Site-specific additions: an optional /jffs/scripts/services-start.local runs
+# last, so local additions survive upgrades of this file.
+LOCAL="/jffs/scripts/services-start.local"
+[ -x "$LOCAL" ] && "$LOCAL"

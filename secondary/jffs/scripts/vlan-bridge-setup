@@ -62,6 +62,13 @@ LOG="/tmp/vlan-bridge-setup.log"
 # no hardcoded interface lists to keep in sync.
 IOT_VLAN="40";   IOT_BRIDGE="br40";   IOT_SSID="MyNet-IoT"
 GUEST_VLAN="30"; GUEST_BRIDGE="br30"; GUEST_SSID="MyNet-Guest"
+HB_TAG="vlan-watch" # hb= value on the vlan_watch_hb heartbeat
+
+# Site overrides: an optional /jffs/configs/vlan-bridge.conf (plain sh
+# assignments) may set any value above, e.g. IOT_SSID / GUEST_SSID, so an
+# upgrade of this script never overwrites your settings.
+VLAN_BRIDGE_CONF="/jffs/configs/vlan-bridge.conf"
+[ -f "$VLAN_BRIDGE_CONF" ] && . "$VLAN_BRIDGE_CONF"
 
 log() { echo "[$(date '+%H:%M:%S')] vlan-bridge: $*" | tee -a "$LOG"; }
 
@@ -296,7 +303,7 @@ watch_vaps() {
     last_syslog_hb=$(date +%s)
 
     log "watcher: started (interval=${WATCH_INTERVAL}s, heartbeat=${HEARTBEAT_INTERVAL}s)"
-    logger -t vlan-watch "vlan_watch_hb hb=vlan-watch"
+    logger -t vlan-watch "vlan_watch_hb hb=${HB_TAG}"
     [ -f "$WATCHER_REPAIRS" ] || echo 0 > "$WATCHER_REPAIRS"
 
     local trunk_now trunk_pending=""
@@ -384,7 +391,7 @@ watch_vaps() {
         fi
 
         if [ $((now - last_syslog_hb)) -ge "$SYSLOG_HB_INTERVAL" ]; then
-            logger -t vlan-watch "vlan_watch_hb hb=vlan-watch"
+            logger -t vlan-watch "vlan_watch_hb hb=${HB_TAG}"
             last_syslog_hb=$now
         fi
     done

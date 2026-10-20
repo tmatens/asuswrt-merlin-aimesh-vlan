@@ -38,3 +38,8 @@ if [ "$TARGET" = "wireless" ] && [ "$EVENT" != "stop" ]; then
         logger -t service-event-end "ERROR: $SETUP not found or not executable"
     fi
 fi
+
+# Site-specific additions: an optional /jffs/scripts/service-event-end.local runs
+# last, so local additions survive upgrades of this file.
+LOCAL="/jffs/scripts/service-event-end.local"
+[ -x "$LOCAL" ] && "$LOCAL" "$@"

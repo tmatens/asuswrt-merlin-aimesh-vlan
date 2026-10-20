@@ -88,9 +88,9 @@ VAP indexes.
 VAPs are discovered dynamically **by SSID name** — the scripts match
 whatever interfaces currently serve `IOT_SSID` / `GUEST_SSID`, so band
 toggles and per-node VAP-index differences (root vs. satellite) need no
-per-node interface lists. Edit `IOT_VLAN` / `GUEST_VLAN` / `IOT_SSID` /
-`GUEST_SSID` at the top of each `vlan-bridge-setup` script to match your
-network.
+per-node interface lists. Set `IOT_SSID` / `GUEST_SSID` (and the VLAN IDs
+if yours differ) in a small config file — see
+[Customizing](#customizing-without-editing-the-scripts).
 
 ## Backup and recovery — read before installing
 
@@ -187,8 +187,8 @@ Requirements:
 - **Backup taken** as described above.
 - **Guest and IoT SSIDs already created and enabled** in the Asus/Merlin
   UI. This code routes their VAPs to VLAN bridges; it does **not** create
-  the SSIDs themselves. Set `IOT_SSID` / `GUEST_SSID` at the top of each
-  `vlan-bridge-setup` to your SSID names — VAPs are discovered by SSID, so
+  the SSIDs themselves. Set `IOT_SSID` / `GUEST_SSID` to your SSID names
+  (see [Customizing](#customizing-without-editing-the-scripts)) — VAPs are discovered by SSID, so
   indexes don't matter; [`docs/topology.md`](docs/topology.md) has a
   one-liner that prints every configured VAP and its SSID name via
   `nvram get`.
@@ -206,9 +206,10 @@ cd asuswrt-merlin-aimesh-vlan
 
 # Step 0: take backups (see "Pre-install backup" above) — do not skip.
 
-# Edit IOT_VLAN / GUEST_VLAN / IOT_SSID / GUEST_SSID in:
-#   main/jffs/scripts/vlan-bridge-setup
-#   secondary/jffs/scripts/vlan-bridge-setup
+# Name your SSIDs (see "Customizing"); install.sh copies this to each node:
+mkdir -p main/jffs/configs secondary/jffs/configs
+printf 'IOT_SSID="Home-IoT"\nGUEST_SSID="Home-Guest"\n' > main/jffs/configs/vlan-bridge.conf
+cp main/jffs/configs/vlan-bridge.conf secondary/jffs/configs/
 
 # Wired root:
 ./tools/install.sh main      192.168.1.1   admin
@@ -262,6 +263,28 @@ DHCP returns an IP from the LAN scope (VLAN 1) instead, the problem is
 **upstream** of the AP — most likely the trunk port on your managed
 switch isn't tagging VLAN 30/40, or your upstream router has no DHCP
 scope on those VLANs. Nothing more to fix on the AP side.
+
+## Customizing without editing the scripts
+
+Upgrading means copying new scripts over the old ones, so keep your settings
+and additions outside them:
+
+- **`/jffs/configs/vlan-bridge.conf`** — plain `sh` assignments, read by
+  `vlan-bridge-setup` after its defaults. Any variable from the top of the
+  script can be overridden; usually just:
+
+  ```sh
+  IOT_SSID="Home-IoT"
+  GUEST_SSID="Home-Guest"
+  ```
+
+  `tools/install.sh` copies everything in `<role>/jffs/configs/` to the
+  node's `/jffs/configs/`, so keep a per-role copy in your clone.
+- **`*.local` hooks** — `services-start`, `service-event-end` and (satellite)
+  `init-start` each finish by running `/jffs/scripts/<name>.local` if it is
+  executable, with the same arguments. Put your own cron jobs, daemons or
+  experiments there. A file you add under `<role>/jffs/scripts/` is
+  installed alongside the rest.
 
 ## Monitoring & alerting (optional)
 
@@ -326,8 +349,8 @@ instead of within 15 minutes.
 
 It should work on any Asuswrt-Merlin AP with the standard `wlN.M`
 interface naming and `wds*.0.1` backhaul. If you try it on a different
-model, edit `IOT_SSID` / `GUEST_SSID` and the `TRUNK` value to match —
-they're the only model-specific bits.
+model, set `IOT_SSID` / `GUEST_SSID` and, if needed, `TRUNK` (root) or
+`DEFAULT_TRUNK` (satellite) to match — they're the only model-specific bits.
 
 ## Status / support
 

@@ -43,3 +43,8 @@ brctl addbr br30  2>/dev/null
 brctl setfd br30 0
 brctl stp   br30 off
 ip link set br30 up
+
+# Site-specific additions: an optional /jffs/scripts/init-start.local runs
+# last, so local additions survive upgrades of this file.
+LOCAL="/jffs/scripts/init-start.local"
+[ -x "$LOCAL" ] && "$LOCAL"

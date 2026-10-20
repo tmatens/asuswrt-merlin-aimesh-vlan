@@ -59,6 +59,13 @@ HB_TICKS=30       # heartbeat every HB_TICKS x WATCH_INTERVAL = 5 min
 # no hardcoded interface lists to keep in sync.
 IOT_VLAN="40";   IOT_BRIDGE="br40";   IOT_SSID="MyNet-IoT"
 GUEST_VLAN="30"; GUEST_BRIDGE="br30"; GUEST_SSID="MyNet-Guest"
+HB_TAG="vlan-watch" # hb= value on the vlan_watch_hb heartbeat
+
+# Site overrides: an optional /jffs/configs/vlan-bridge.conf (plain sh
+# assignments) may set any value above, e.g. IOT_SSID / GUEST_SSID, so an
+# upgrade of this script never overwrites your settings.
+VLAN_BRIDGE_CONF="/jffs/configs/vlan-bridge.conf"
+[ -f "$VLAN_BRIDGE_CONF" ] && . "$VLAN_BRIDGE_CONF"
 
 log() { echo "[$(date '+%H:%M:%S')] vlan-bridge: $*" | tee -a "$LOG"; }
 
@@ -253,13 +260,13 @@ WATCHER_PIDFILE="/tmp/vlan-bridge-watcher.pid"
 watch_backhaul() {
     WATCH_MODE=1
     local tick=0
-    logger -t vlan-watch "vlan_watch_hb hb=vlan-watch"
+    logger -t vlan-watch "vlan_watch_hb hb=${HB_TAG}"
     while true; do
         sleep "$WATCH_INTERVAL"
         tick=$((tick + 1))
         if [ "$tick" -ge "$HB_TICKS" ]; then
             tick=0
-            logger -t vlan-watch "vlan_watch_hb hb=vlan-watch"
+            logger -t vlan-watch "vlan_watch_hb hb=${HB_TAG}"
         fi
         # Always run setup — it is a no-op when interfaces exist in the
         # correct bridge, but will repair interfaces that the kernel or
