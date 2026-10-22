@@ -1,6 +1,7 @@
 #!/bin/sh
 # =============================================================================
 # monitor-backhaul.sh — Log backhaul link state changes with timestamps
+# Version            : 0.1.0
 #
 # Location on router : /jffs/scripts/monitor-backhaul.sh  (main node only)
 # Started by         : services-start (background)

@@ -1,6 +1,7 @@
 #!/bin/sh
 # =============================================================================
 # init-start  (SATELLITE / SECONDARY NODE)
+# Version            : 0.1.0
 #
 # Location on router : /jffs/scripts/init-start
 # Called by          : Asuswrt-Merlin — very early in boot, before wireless

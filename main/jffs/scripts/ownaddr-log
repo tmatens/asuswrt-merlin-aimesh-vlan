@@ -3,6 +3,7 @@
 # ownaddr-log — log the frames behind the kernel's
 #   "<bridge>: received packet on <port> with own address as source address"
 # warning (forensics data, never an alert).
+# Version            : 0.1.0
 #
 # The kernel warns when a frame arrives on a bridge port whose SOURCE MAC is
 # one of that bridge's own local addresses (the bridge plus every member

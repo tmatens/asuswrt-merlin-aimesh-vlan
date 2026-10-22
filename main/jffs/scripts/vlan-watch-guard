@@ -1,6 +1,7 @@
 #!/bin/sh
 # =============================================================================
 # vlan-watch-guard — self-healing for the vlan-bridge watcher
+# Version            : 0.1.0
 #
 # Location on router : /jffs/scripts/vlan-watch-guard
 # Called by          : cru cron every 5 min (registered by services-start and

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # install.sh — SCP the jffs scripts to an Asuswrt-Merlin node
+# Version            : 0.1.0
 #
 # Usage:
 #   ./tools/install.sh main      <host>   [ssh-user]
@@ -31,7 +32,9 @@ ROLE="$1"
 HOST="$2"
 SSH_USER="${3:-admin}"
 
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/${ROLE}/jffs/scripts"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC_DIR="${REPO_DIR}/${ROLE}/jffs/scripts"
+VERSION="$(cat "${REPO_DIR}/VERSION" 2>/dev/null || echo unknown)"
 
 if [ ! -d "$SRC_DIR" ]; then
     echo "ERROR: source directory not found: $SRC_DIR"
@@ -39,7 +42,8 @@ if [ ! -d "$SRC_DIR" ]; then
     exit 1
 fi
 
-echo "Installing ${ROLE} scripts from ${SRC_DIR} to ${SSH_USER}@${HOST}:/jffs/scripts/"
+echo "Installing asuswrt-merlin-aimesh-vlan ${VERSION} (${ROLE}) from ${SRC_DIR}"
+echo "  to ${SSH_USER}@${HOST}:/jffs/scripts/"
 echo
 
 # Copy each file. Some routers' scp is busybox and refuses recursive copies,

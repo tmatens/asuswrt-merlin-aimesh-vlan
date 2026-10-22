@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # iot-isolate.sh — Toggle AP isolation and ebtables on IoT SSIDs
+# Version            : 0.1.0
 #
 # Usage:
 #   ./tools/iot-isolate.sh <main-host> <secondary-host> {disable|enable|status}
