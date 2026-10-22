@@ -2,6 +2,7 @@
 # =============================================================================
 # bh-links — per-minute wireless-backhaul link sampler (forensics data, never
 # an alert).
+# Version            : 0.1.0
 #
 # One `BH_LINKS` logfmt line per minute per node, so that when the bridging-
 # loop signal ("own address as source") rises, syslog already holds, minute by

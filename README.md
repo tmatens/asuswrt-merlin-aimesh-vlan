@@ -352,6 +352,29 @@ interface naming and `wds*.0.1` backhaul. If you try it on a different
 model, set `IOT_SSID` / `GUEST_SSID` and, if needed, `TRUNK` (root) or
 `DEFAULT_TRUNK` (satellite) to match — they're the only model-specific bits.
 
+## Versioning
+
+Releases are tagged `vX.Y.Z` on GitHub. The same number sits in the header
+of every script, so a node can tell you what it is running:
+
+```sh
+grep -m1 '^# Version' /jffs/scripts/vlan-bridge-setup
+```
+
+Quote it when reporting a problem. `tools/install.sh` prints the version it
+is installing.
+
+**0.x means the behaviour and the config-file keys may still change between
+releases.** 1.0 is earned, not scheduled. It needs:
+
+- confirmed working on at least one model other than the ZenWiFi ET8;
+- the Guest Network Pro / AiMesh Guest path tested;
+- a check on a 3006.x firmware;
+- a few installs other than mine surviving several reboot and
+  `restart_wireless` cycles (report in the GitHub issues).
+
+Until then, read the release notes before upgrading.
+
 ## Status / support
 
 No-promise codebase. Issues and PRs welcome but I won't always have time

@@ -1,6 +1,7 @@
 #!/bin/sh
 # =============================================================================
 # vlan-bridge-setup  (SATELLITE / SECONDARY NODE)
+# Version            : 0.1.0
 #
 # Location on router : /jffs/scripts/vlan-bridge-setup
 # Called by          : services-start (boot), service-event-end (wireless restart)
