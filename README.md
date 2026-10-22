@@ -377,6 +377,11 @@ Until then, read the release notes before upgrading.
 
 ## Status / support
 
+Discussion thread on SNBForums (Asuswrt-Merlin AddOns):
+<https://www.snbforums.com/threads/release-aimesh-vlan-v0-1-0-guest-iot-ssids-on-their-own-vlans-across-an-aimesh-wireless-backhaul-included.98148/>.
+Reports from models other than the ZenWiFi ET8 are the most useful thing
+you can post there.
+
 No-promise codebase. Issues and PRs welcome but I won't always have time
 to respond. If something's broken on your hardware, the scripts are short
 (<300 lines each) and the comments are extensive — read and adapt.
